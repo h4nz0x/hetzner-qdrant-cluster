@@ -1,0 +1,272 @@
+name: Production Qdrant Snapshot Backup
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type CREATE_QDRANT_S3_SNAPSHOT_BACKUP"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mongodb-infra-workflows
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: 1. Validate protected Qdrant backup request
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, mongodb-infra]
+    steps:
+      - name: Validate explicit confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          if [[ "$CONFIRMATION" != "CREATE_QDRANT_S3_SNAPSHOT_BACKUP" ]]; then
+            echo "::error::confirmation must be exactly CREATE_QDRANT_S3_SNAPSHOT_BACKUP"
+            exit 1
+          fi
+
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify runner prerequisites
+        run: |
+          set -euo pipefail
+          missing=0
+          for command in aws python3 shellcheck ssh ssh-keygen ssh-keyscan timeout; do
+            if ! command -v "$command" >/dev/null 2>&1; then
+              echo "::error::$command is required on the self-hosted runner"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
+      - name: Validate Qdrant backup safeguards
+        run: |
+          set -euo pipefail
+          python3 tests/qdrant-design-test.py
+          python3 tests/qdrant-live-audit-test.py
+          python3 tests/qdrant-runtime-audit-test.py
+          python3 tests/qdrant-backup-test.py
+          shellcheck --severity=warning scripts/qdrant-backup-node.sh
+
+  backup:
+    name: 2. Create and upload Qdrant snapshots
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, mongodb-infra]
+    environment: production
+    timeout-minutes: 90
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.QDRANT_BACKUP_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.QDRANT_BACKUP_AWS_REGION }}
+      QDRANT_BACKUP_S3_BUCKET: ${{ secrets.QDRANT_BACKUP_S3_BUCKET }}
+      QDRANT_BACKUP_S3_PREFIX: ${{ secrets.QDRANT_BACKUP_S3_PREFIX }}
+    steps:
+      - name: Check out approved main revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate protected backup secrets
+        run: |
+          set -euo pipefail
+          for name in \
+            AWS_ACCESS_KEY_ID \
+            AWS_SECRET_ACCESS_KEY \
+            AWS_DEFAULT_REGION \
+            QDRANT_BACKUP_S3_BUCKET \
+            QDRANT_BACKUP_S3_PREFIX; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::${name} is not configured"
+              exit 1
+            fi
+          done
+
+      - name: Prepare Qdrant SSH configuration
+        env:
+          QDRANT_SSH_PRIVATE_KEY: ${{ secrets.QDRANT_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$QDRANT_SSH_PRIVATE_KEY" || {
+            echo "::error::QDRANT_SSH_PRIVATE_KEY is not configured"
+            exit 1
+          }
+
+          ssh_dir="${RUNNER_TEMP}/production-qdrant-backup-ssh"
+          key_file="${ssh_dir}/qdrant_backup"
+          known_hosts_file="${ssh_dir}/known_hosts"
+          config_file="${ssh_dir}/config"
+          install -d -m 0700 "$ssh_dir"
+          printf '%s\n' "$QDRANT_SSH_PRIVATE_KEY" > "$key_file"
+          chmod 0600 "$key_file"
+          install -m 0600 /dev/null "$known_hosts_file"
+
+          cat > "$config_file" <<EOF
+          Host qdrant-node-1
+            HostName 203.0.113.11
+            User root
+            IdentityFile ${key_file}
+            IdentitiesOnly yes
+            UserKnownHostsFile ${known_hosts_file}
+            StrictHostKeyChecking yes
+            ControlMaster no
+            ControlPath none
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
+
+          Host qdrant-node-2
+            HostName 203.0.113.12
+            User root
+            IdentityFile ${key_file}
+            IdentitiesOnly yes
+            UserKnownHostsFile ${known_hosts_file}
+            StrictHostKeyChecking yes
+            ControlMaster no
+            ControlPath none
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
+
+          Host qdrant-node-3
+            HostName 203.0.113.13
+            User root
+            IdentityFile ${key_file}
+            IdentitiesOnly yes
+            UserKnownHostsFile ${known_hosts_file}
+            StrictHostKeyChecking yes
+            ControlMaster no
+            ControlPath none
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
+          EOF
+          chmod 0600 "$config_file"
+
+          ssh-keyscan -T 10 -t ed25519 \
+            203.0.113.11 203.0.113.12 203.0.113.13 \
+            2>/dev/null >> "$known_hosts_file"
+          for host in 203.0.113.11 203.0.113.12 203.0.113.13; do
+            ssh-keygen -F "$host" -f "$known_hosts_file" >/dev/null || {
+              echo "::error::Could not obtain SSH host key for ${host}"
+              exit 1
+            }
+          done
+          echo "QDRANT_BACKUP_SSH_CONFIG=${config_file}" >> "$GITHUB_ENV"
+
+      - name: Create Qdrant collection snapshots
+        run: |
+          set -euo pipefail
+          backup_id="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          raw_dir="${RUNNER_TEMP}/production-qdrant-backup-raw"
+          report_dir="${RUNNER_TEMP}/production-qdrant-backup-report"
+          remote_cmd='/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash -s --'
+          install -d -m 0700 "$raw_dir" "$report_dir"
+          printf '%s\n' "$backup_id" > "${report_dir}/backup-id.txt"
+
+          for node in qdrant-node-1 qdrant-node-2 qdrant-node-3; do
+            timeout 900 ssh \
+              -F "$QDRANT_BACKUP_SSH_CONFIG" \
+              "$node" \
+              "${remote_cmd} create ${node} ${backup_id}" \
+              < scripts/qdrant-backup-node.sh \
+              > "${raw_dir}/${node}.json"
+          done
+
+      - name: Build Qdrant backup manifest
+        run: |
+          set -euo pipefail
+          backup_id="$(cat "${RUNNER_TEMP}/production-qdrant-backup-report/backup-id.txt")"
+          raw_dir="${RUNNER_TEMP}/production-qdrant-backup-raw"
+          report_dir="${RUNNER_TEMP}/production-qdrant-backup-report"
+
+          python3 scripts/qdrant-backup-manifest.py \
+            --node-json "${raw_dir}/qdrant-node-1.json" \
+            --node-json "${raw_dir}/qdrant-node-2.json" \
+            --node-json "${raw_dir}/qdrant-node-3.json" \
+            --backup-id "$backup_id" \
+            --bucket "$QDRANT_BACKUP_S3_BUCKET" \
+            --prefix "$QDRANT_BACKUP_S3_PREFIX" \
+            --output-json "${report_dir}/qdrant-backup-manifest.json" \
+            --output-md "${report_dir}/qdrant-backup-summary.md" \
+            --upload-tsv "${report_dir}/qdrant-backup-upload.tsv"
+
+      - name: Upload Qdrant snapshots and manifest to S3
+        run: |
+          set -euo pipefail
+          report_dir="${RUNNER_TEMP}/production-qdrant-backup-report"
+          upload_tsv="${report_dir}/qdrant-backup-upload.tsv"
+          remote_cmd='/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash -s --'
+
+          while IFS=$'\t' read -r node collection snapshot_name s3_key; do
+            timeout 900 ssh \
+              -F "$QDRANT_BACKUP_SSH_CONFIG" \
+              "$node" \
+              "${remote_cmd} download ${collection} ${snapshot_name}" \
+              < scripts/qdrant-backup-node.sh \
+              | aws s3 cp - "s3://${QDRANT_BACKUP_S3_BUCKET}/${s3_key}"
+          done < "$upload_tsv"
+
+          manifest_file="${report_dir}/qdrant-backup-manifest.json"
+          manifest_key="$(
+            python3 - "$manifest_file" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              print(json.load(handle)["manifest_key"])
+          PY
+          )"
+          aws s3 cp \
+            "$manifest_file" \
+            "s3://${QDRANT_BACKUP_S3_BUCKET}/${manifest_key}"
+
+      - name: Apply Qdrant backup S3 retention
+        run: |
+          set -euo pipefail
+          report_dir="${RUNNER_TEMP}/production-qdrant-backup-report"
+          backup_id="$(cat "${report_dir}/backup-id.txt")"
+          prefix="${QDRANT_BACKUP_S3_PREFIX%/}/"
+
+          aws s3api list-objects-v2 \
+            --bucket "$QDRANT_BACKUP_S3_BUCKET" \
+            --prefix "$prefix" \
+            --delimiter "/" \
+            > "${report_dir}/s3-prefixes.json"
+
+          python3 scripts/qdrant-s3-retention-plan.py \
+            --prefixes-json "${report_dir}/s3-prefixes.json" \
+            --keep 2 \
+            --protected-backup-id "$backup_id" \
+            --output "${report_dir}/delete-prefixes.txt"
+
+          while IFS= read -r delete_prefix; do
+            [[ -z "$delete_prefix" ]] && continue
+            aws s3 rm "s3://${QDRANT_BACKUP_S3_BUCKET}/${delete_prefix}" --recursive
+          done < "${report_dir}/delete-prefixes.txt"
+
+          cat "${report_dir}/qdrant-backup-summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized Qdrant backup evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-qdrant-backup-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/production-qdrant-backup-report/qdrant-backup-manifest.json
+            ${{ runner.temp }}/production-qdrant-backup-report/qdrant-backup-summary.md
+            ${{ runner.temp }}/production-qdrant-backup-report/delete-prefixes.txt
+          retention-days: 30
+
+      - name: Remove temporary Qdrant backup material
+        if: always()
+        run: |
+          rm -rf \
+            "${RUNNER_TEMP}/production-qdrant-backup-ssh" \
+            "${RUNNER_TEMP}/production-qdrant-backup-raw" \
+            "${RUNNER_TEMP}/production-qdrant-backup-report"

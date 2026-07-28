@@ -221,6 +221,8 @@ Required alerts before declaring Qdrant managed:
    - Upload to object storage.
    - Retain only two completed backup sets after successful upload.
    - Add stale-backup alerting.
+   - Workflow/runbook:
+     [qdrant-snapshot-backup.md](runbooks/qdrant-snapshot-backup.md).
 
 5. Add disposable restore drill.
    - Restore exact snapshots.
