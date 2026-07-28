@@ -208,6 +208,8 @@ Required alerts before declaring Qdrant managed:
    - Query compose image tags, cluster membership, collection replication, and
      snapshot status through an approved read-only path.
    - Do not restart containers or change collections.
+   - Workflow/runbook:
+     [qdrant-runtime-audit.md](runbooks/qdrant-runtime-audit.md).
 
 3. Add Ansible inventory and templates in check mode.
    - The first role PR should render the current compose model byte-for-byte
