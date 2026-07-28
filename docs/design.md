@@ -93,7 +93,7 @@ Firewall contract:
 
 | Direction | Ports | Policy |
 | --- | --- | --- |
-| Load balancer or app subnets -> Qdrant nodes | `6333`, `6334` | Allow only approved app/client paths |
+| LB/app subnets -> Qdrant nodes | `6333`, `6334` | Allow only approved app/client paths |
 | Qdrant node -> Qdrant node | `6333`, `6334`, `6335` | Private network only |
 | Monitoring -> Qdrant nodes | `6336` or direct metrics endpoint | Private monitoring source only |
 | Public internet -> Qdrant nodes | any | Deny |
@@ -196,30 +196,36 @@ Required alerts before declaring Qdrant managed:
 
 ## Migration phases
 
-1. Add a read-only Qdrant audit workflow.
-   - Query live server metadata, volume attachments, LB services, firewall
-     rules, compose image tags, cluster membership, collection replication, and
-     snapshot status.
+1. Add a read-only Qdrant Hetzner inventory audit workflow.
+   - Query live server metadata, volume attachments, load balancers, networks,
+     and Qdrant-named firewalls.
    - Upload sanitized evidence.
    - Do not change live servers.
+   - Workflow/runbook:
+     [qdrant-live-inventory-audit.md](runbooks/qdrant-live-inventory-audit.md).
 
-2. Add Ansible inventory and templates in check mode.
+2. Add a read-only Qdrant runtime audit.
+   - Query compose image tags, cluster membership, collection replication, and
+     snapshot status through an approved read-only path.
+   - Do not restart containers or change collections.
+
+3. Add Ansible inventory and templates in check mode.
    - The first role PR should render the current compose model byte-for-byte
      where possible.
    - Run `ansible-playbook --check --diff` only.
 
-3. Add backup automation.
+4. Add backup automation.
    - Snapshot all collections.
    - Upload to object storage.
    - Retain only two completed backup sets after successful upload.
    - Add stale-backup alerting.
 
-4. Add disposable restore drill.
+5. Add disposable restore drill.
    - Restore exact snapshots.
    - Verify collection and query evidence.
    - Tear down automatically.
 
-5. Only after a successful restore drill, decide import vs recreate.
+6. Only after a successful restore drill, decide import vs recreate.
    - Import if live resources match the desired topology and are worth keeping.
    - Recreate only during an approved maintenance/cutover window.
 

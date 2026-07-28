@@ -63,7 +63,8 @@ def test_qdrant_design_keeps_first_phase_read_only() -> None:
     text = DESIGN.read_text(encoding="utf-8")
 
     for phrase in (
-        "Add a read-only Qdrant audit workflow",
+        "Add a read-only Qdrant Hetzner inventory audit workflow",
+        "Add a read-only Qdrant runtime audit",
         "Do not change live servers",
         "The first Ansible PR must not",
         "restart live Qdrant containers",

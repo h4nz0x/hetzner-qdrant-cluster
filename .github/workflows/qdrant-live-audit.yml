@@ -1,0 +1,64 @@
+name: Production Qdrant Live Inventory Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type READ_ONLY_QDRANT_LIVE_AUDIT"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mongodb-infra-workflows
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Read-only Qdrant Hetzner inventory audit
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, mongodb-infra]
+    environment: production
+    timeout-minutes: 15
+    env:
+      HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Require exact read-only confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ inputs.confirmation }}" = "READ_ONLY_QDRANT_LIVE_AUDIT"
+
+      - name: Validate Qdrant audit safeguards
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/qdrant-design-test.py
+          python3 tests/qdrant-live-audit-test.py
+
+      - name: Run Qdrant live inventory audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/qdrant-live-audit.py \
+            --output-json "${RUNNER_TEMP}/production-qdrant-live-audit.json" \
+            --output-md "${RUNNER_TEMP}/production-qdrant-live-audit.md"
+
+          cat "${RUNNER_TEMP}/production-qdrant-live-audit.md" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized Qdrant audit evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-qdrant-live-audit-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/production-qdrant-live-audit.json
+            ${{ runner.temp }}/production-qdrant-live-audit.md
+          retention-days: 14
