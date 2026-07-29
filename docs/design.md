@@ -228,6 +228,8 @@ Required alerts before declaring Qdrant managed:
    - Restore exact snapshots.
    - Verify collection and query evidence.
    - Tear down automatically.
+   - Workflow/runbook:
+     [qdrant-restore-drill.md](runbooks/qdrant-restore-drill.md).
 
 6. Only after a successful restore drill, decide import vs recreate.
    - Import if live resources match the desired topology and are worth keeping.

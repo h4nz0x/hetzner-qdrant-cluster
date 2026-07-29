@@ -1,0 +1,306 @@
+name: Production Qdrant Restore Drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type RUN_QDRANT_RESTORE_DRILL"
+        required: true
+        type: string
+      backup_id:
+        description: "Backup ID to drill, for example 2026-07-29T10:27:49Z"
+        required: true
+        type: string
+      source_node:
+        default: "qdrant-node-1"
+        description: "Manifest node snapshot to restore into the disposable target"
+        required: true
+        type: string
+      collection:
+        default: ""
+        description: "Optional collection name; empty selects the first manifest collection"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mongodb-infra-workflows
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: 1. Validate protected Qdrant restore drill request
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, mongodb-infra]
+    steps:
+      - name: Validate explicit confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          if [[ "$CONFIRMATION" != "RUN_QDRANT_RESTORE_DRILL" ]]; then
+            echo "::error::confirmation must be exactly RUN_QDRANT_RESTORE_DRILL"
+            exit 1
+          fi
+
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify runner prerequisites
+        run: |
+          set -euo pipefail
+          missing=0
+          for command in aws curl docker python3 shellcheck timeout; do
+            if ! command -v "$command" >/dev/null 2>&1; then
+              echo "::error::$command is required on the self-hosted runner"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
+      - name: Validate Qdrant restore drill safeguards
+        run: |
+          set -euo pipefail
+          python3 tests/qdrant-design-test.py
+          python3 tests/qdrant-live-audit-test.py
+          python3 tests/qdrant-runtime-audit-test.py
+          python3 tests/qdrant-backup-test.py
+          python3 tests/qdrant-restore-drill-test.py
+          shellcheck --severity=warning scripts/qdrant-backup-node.sh
+
+  restore-drill:
+    name: 2. Restore snapshot into disposable Qdrant
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, mongodb-infra]
+    environment: production
+    timeout-minutes: 90
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.QDRANT_BACKUP_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.QDRANT_BACKUP_AWS_REGION }}
+      QDRANT_BACKUP_S3_BUCKET: ${{ secrets.QDRANT_BACKUP_S3_BUCKET }}
+      QDRANT_BACKUP_S3_PREFIX: ${{ secrets.QDRANT_BACKUP_S3_PREFIX }}
+      RESTORE_BACKUP_ID: ${{ inputs.backup_id }}
+      RESTORE_SOURCE_NODE: ${{ inputs.source_node }}
+      RESTORE_COLLECTION: ${{ inputs.collection }}
+      RESTORE_IMAGE: qdrant/qdrant:v1.17.0
+    steps:
+      - name: Check out approved main revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate protected restore drill inputs and secrets
+        run: |
+          set -euo pipefail
+          for name in \
+            AWS_ACCESS_KEY_ID \
+            AWS_SECRET_ACCESS_KEY \
+            AWS_DEFAULT_REGION \
+            QDRANT_BACKUP_S3_BUCKET \
+            QDRANT_BACKUP_S3_PREFIX \
+            RESTORE_BACKUP_ID \
+            RESTORE_SOURCE_NODE; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::${name} is not configured"
+              exit 1
+            fi
+          done
+
+          python3 - "$RESTORE_BACKUP_ID" "$RESTORE_SOURCE_NODE" <<'PY'
+          import re
+          import sys
+
+          backup_id, source_node = sys.argv[1:3]
+          backup_id_pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
+          safe_name = r"^[A-Za-z0-9_.:-]+$"
+          if not re.fullmatch(backup_id_pattern, backup_id):
+              raise SystemExit("backup_id must be an exact UTC timestamp")
+          if not re.fullmatch(safe_name, source_node):
+              raise SystemExit("source_node contains unsupported characters")
+          PY
+
+      - name: Prepare disposable restore drill workspace
+        run: |
+          set -euo pipefail
+          drill_dir="${RUNNER_TEMP}/production-qdrant-restore-drill"
+          report_dir="${drill_dir}/report"
+          snapshot_dir="${drill_dir}/snapshots"
+          storage_dir="${drill_dir}/storage"
+          install -d -m 0700 "$report_dir" "$snapshot_dir" "$storage_dir"
+          chmod 0755 "$drill_dir" "$snapshot_dir"
+          chmod 0777 "$storage_dir"
+          {
+            echo "QDRANT_RESTORE_DRILL_DIR=${drill_dir}"
+            echo "QDRANT_RESTORE_REPORT_DIR=${report_dir}"
+            echo "QDRANT_RESTORE_SNAPSHOT_DIR=${snapshot_dir}"
+            echo "QDRANT_RESTORE_STORAGE_DIR=${storage_dir}"
+          } >> "$GITHUB_ENV"
+
+      - name: Download Qdrant backup manifest from S3
+        run: |
+          set -euo pipefail
+          manifest_key="${QDRANT_BACKUP_S3_PREFIX%/}/${RESTORE_BACKUP_ID}/manifest.json"
+          aws s3 cp \
+            "s3://${QDRANT_BACKUP_S3_BUCKET}/${manifest_key}" \
+            "${QDRANT_RESTORE_REPORT_DIR}/qdrant-backup-manifest.json"
+
+      - name: Build disposable restore drill plan
+        run: |
+          set -euo pipefail
+          plan_args=(
+            plan
+            --manifest "${QDRANT_RESTORE_REPORT_DIR}/qdrant-backup-manifest.json"
+            --backup-id "$RESTORE_BACKUP_ID"
+            --source-node "$RESTORE_SOURCE_NODE"
+            --snapshot-dir "$QDRANT_RESTORE_SNAPSHOT_DIR"
+            --output-json "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-plan.json"
+            --output-md "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-plan.md"
+          )
+          if [[ -n "$RESTORE_COLLECTION" ]]; then
+            plan_args+=(--collection "$RESTORE_COLLECTION")
+          fi
+          python3 scripts/qdrant-restore-drill.py "${plan_args[@]}"
+
+      - name: Download selected Qdrant snapshot from S3
+        run: |
+          set -euo pipefail
+          plan_file="${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-plan.json"
+          s3_key="$(
+            python3 -c \
+              'import json,sys; print(json.load(open(sys.argv[1]))["s3_key"])' \
+              "$plan_file"
+          )"
+          snapshot_file="$(
+            python3 -c \
+              'import json,sys; print(json.load(open(sys.argv[1]))["local_snapshot_path"])' \
+              "$plan_file"
+          )"
+          expected_size="$(
+            python3 -c \
+              'import json,sys; print(json.load(open(sys.argv[1]))["expected_size"])' \
+              "$plan_file"
+          )"
+          install -d -m 0755 "$(dirname "$snapshot_file")"
+
+          aws s3 cp "s3://${QDRANT_BACKUP_S3_BUCKET}/${s3_key}" "$snapshot_file"
+          chmod 0644 "$snapshot_file"
+          actual_size="$(stat -c '%s' "$snapshot_file")"
+          if [[ "$actual_size" != "$expected_size" ]]; then
+            echo "::error::snapshot size mismatch: expected ${expected_size}, got ${actual_size}"
+            exit 1
+          fi
+
+      - name: Start disposable Qdrant restore target
+        run: |
+          set -euo pipefail
+          container_name="qdrant-restore-drill-${GITHUB_RUN_ID}"
+          port="$(
+            python3 - <<'PY'
+          import socket
+
+          with socket.socket() as sock:
+              sock.bind(("127.0.0.1", 0))
+              print(sock.getsockname()[1])
+          PY
+          )"
+          restore_url="http://127.0.0.1:${port}"
+          echo "QDRANT_RESTORE_CONTAINER=${container_name}" >> "$GITHUB_ENV"
+          echo "QDRANT_RESTORE_URL=${restore_url}" >> "$GITHUB_ENV"
+
+          docker rm -f "$container_name" >/dev/null 2>&1 || true
+          docker image inspect "$RESTORE_IMAGE" >/dev/null 2>&1 || docker pull "$RESTORE_IMAGE"
+          docker run \
+            --detach \
+            --name "$container_name" \
+            --publish "127.0.0.1:${port}:6333" \
+            --volume "${QDRANT_RESTORE_SNAPSHOT_DIR}:/qdrant/snapshots:ro" \
+            --volume "${QDRANT_RESTORE_STORAGE_DIR}:/qdrant/storage" \
+            "$RESTORE_IMAGE"
+
+          for _ in $(seq 1 90); do
+            if curl --fail --silent --show-error "${restore_url}/readiness" >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::disposable Qdrant did not become ready"
+          docker logs "$container_name" || true
+          exit 1
+
+      - name: Restore selected snapshot into disposable Qdrant
+        run: |
+          set -euo pipefail
+          plan_file="${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-plan.json"
+          collection="$(
+            python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["collection"])' \
+              "$plan_file"
+          )"
+          collection_url="$(
+            python3 -c \
+              'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' \
+              "$collection"
+          )"
+          file_uri="$(
+            python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["qdrant_file_uri"])' \
+              "$plan_file"
+          )"
+
+          python3 - "$file_uri" > "${QDRANT_RESTORE_REPORT_DIR}/recover-body.json" <<'PY'
+          import json
+          import sys
+
+          print(json.dumps({"location": sys.argv[1], "priority": "snapshot"}))
+          PY
+
+          timeout 1800 curl \
+            --fail \
+            --silent \
+            --show-error \
+            --max-time 1800 \
+            --request PUT \
+            --header "Content-Type: application/json" \
+            --data @"${QDRANT_RESTORE_REPORT_DIR}/recover-body.json" \
+            "${QDRANT_RESTORE_URL}/collections/${collection_url}/snapshots/recover?wait=true"
+
+      - name: Verify disposable Qdrant restore
+        run: |
+          set -euo pipefail
+          plan_file="${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-plan.json"
+          collection="$(
+            python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["collection"])' \
+              "$plan_file"
+          )"
+          python3 scripts/qdrant-restore-drill.py verify \
+            --qdrant-url "$QDRANT_RESTORE_URL" \
+            --collection "$collection" \
+            --output-json "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-report.json" \
+            --output-md "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-result.md"
+
+          cat "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-plan.md" >> "$GITHUB_STEP_SUMMARY"
+          cat "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-result.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized Qdrant restore drill evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-qdrant-restore-drill-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-backup-manifest.json
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-plan.json
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-plan.md
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-report.json
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-result.md
+          retention-days: 30
+
+      - name: Remove disposable Qdrant restore drill material
+        if: always()
+        run: |
+          if [[ -n "${QDRANT_RESTORE_CONTAINER:-}" ]]; then
+            docker rm -f "$QDRANT_RESTORE_CONTAINER" >/dev/null 2>&1 || true
+          fi
+          rm -rf "${QDRANT_RESTORE_DRILL_DIR:-/tmp/unused-qdrant-restore-drill}"
