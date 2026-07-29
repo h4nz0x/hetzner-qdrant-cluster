@@ -3,6 +3,7 @@ set -euo pipefail
 
 mode="${1:?mode is required: create or download}"
 qdrant_url="${QDRANT_LOCAL_URL:-http://127.0.0.1:6333}"
+qdrant_curl_max_time="${QDRANT_CURL_MAX_TIME:-120}"
 
 if [[ -z "${QDRANT_API_KEY:-}" && -r /etc/qdrant/cluster.env ]]; then
   set -a
@@ -25,13 +26,13 @@ curl_qdrant() {
   local path="$2"
   shift 2
   if [[ -n "$api_key" ]]; then
-    curl --fail --silent --show-error --max-time 120 \
+    curl --fail --silent --show-error --max-time "$qdrant_curl_max_time" \
       --request "$method" \
       --header "api-key: ${api_key}" \
       "$@" \
       "${qdrant_url}${path}"
   else
-    curl --fail --silent --show-error --max-time 120 \
+    curl --fail --silent --show-error --max-time "$qdrant_curl_max_time" \
       --request "$method" \
       "$@" \
       "${qdrant_url}${path}"
@@ -108,6 +109,7 @@ PY
     snapshot_name="${3:?snapshot name is required}"
     encoded_collection="$(url_quote "$collection")"
     encoded_snapshot="$(url_quote "$snapshot_name")"
+    qdrant_curl_max_time="${QDRANT_DOWNLOAD_MAX_TIME:-840}"
     curl_qdrant GET "/collections/${encoded_collection}/snapshots/${encoded_snapshot}"
     ;;
   *)

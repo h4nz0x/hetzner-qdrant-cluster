@@ -127,6 +127,8 @@ class QdrantBackupTest(unittest.TestCase):
         script = NODE_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("/collections/{encoded}/snapshots?wait=true", script)
         self.assertIn("/collections/${encoded_collection}/snapshots/${encoded_snapshot}", script)
+        self.assertIn('qdrant_curl_max_time="${QDRANT_CURL_MAX_TIME:-120}"', script)
+        self.assertIn('qdrant_curl_max_time="${QDRANT_DOWNLOAD_MAX_TIME:-840}"', script)
         for forbidden in ("DELETE", "snapshots/delete", "rm -rf", "docker"):
             self.assertNotIn(forbidden, script)
 
