@@ -225,7 +225,7 @@ jobs:
             "$RESTORE_IMAGE"
 
           for _ in $(seq 1 90); do
-            if curl --fail --silent --show-error "${restore_url}/readiness" >/dev/null; then
+            if curl --fail --silent --show-error "${restore_url}/collections" >/dev/null; then
               exit 0
             fi
             sleep 2
