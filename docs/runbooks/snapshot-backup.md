@@ -1,8 +1,7 @@
 # Qdrant snapshot backup
 
-**Trigger:** protected manual backup after Qdrant runtime audit is clean, before
-ownership/import work, and as the first implementation step toward scheduled
-Qdrant backups.
+**Trigger:** automatic production backup every 12 hours from `main`, plus a
+protected manual backup for operator-initiated runs.
 
 **Safety:** creates Qdrant collection snapshots and uploads them to S3. It does
 not run Docker Compose, restart containers, change collections, restore data,
@@ -10,7 +9,29 @@ write Terraform state, or run Ansible. S3 retention deletes only whole backup
 prefixes older than the latest two completed backup sets, and only after the
 new backup manifest has uploaded.
 
-## Run the backup
+## Schedule
+
+The workflow runs automatically at:
+
+```text
+0 */12 * * *
+```
+
+That gives an expected recovery point of up to 12 hours and keeps storage cost
+bounded by retaining only the latest two completed backup sets.
+
+Scheduled backups do not use the protected `production` environment because an
+environment approval would block unattended execution. These secrets must exist
+as repository secrets for the scheduled path:
+
+- `QDRANT_SSH_PRIVATE_KEY`
+- `QDRANT_BACKUP_AWS_ACCESS_KEY_ID`
+- `QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY`
+- `QDRANT_BACKUP_AWS_REGION`
+- `QDRANT_BACKUP_S3_BUCKET`
+- `QDRANT_BACKUP_S3_PREFIX`
+
+## Run a manual backup
 
 1. Open **Production Qdrant Snapshot Backup** in GitHub Actions.
 2. Select branch `main`.
@@ -23,7 +44,7 @@ new backup manifest has uploaded.
 4. Approve the protected `production` environment gate.
 5. Download artifact `production-qdrant-backup-<run_id>`.
 
-Required protected environment secrets:
+Required protected environment secrets for manual runs:
 
 - `QDRANT_SSH_PRIVATE_KEY`
 - `QDRANT_BACKUP_AWS_ACCESS_KEY_ID`
@@ -59,6 +80,5 @@ The artifact contains:
 
 ## Follow-up
 
-After one protected manual backup succeeds, add the same command path to a
-scheduled workflow. Do not treat Qdrant as production-recoverable until a
-disposable restore drill successfully restores an exact manifest.
+After any backup implementation change, run the disposable restore drill against
+the latest backup manifest before declaring the new path production-proven.
