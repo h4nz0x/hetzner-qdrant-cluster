@@ -259,15 +259,30 @@ jobs:
           print(json.dumps({"location": sys.argv[1], "priority": "snapshot"}))
           PY
 
-          timeout 1800 curl \
-            --fail \
-            --silent \
-            --show-error \
-            --max-time 1800 \
-            --request PUT \
-            --header "Content-Type: application/json" \
-            --data @"${QDRANT_RESTORE_REPORT_DIR}/recover-body.json" \
-            "${QDRANT_RESTORE_URL}/collections/${collection_url}/snapshots/recover?wait=true"
+          response_file="${QDRANT_RESTORE_REPORT_DIR}/recover-response.json"
+          status_file="${QDRANT_RESTORE_REPORT_DIR}/recover-status.txt"
+          set +e
+          status="$(
+            timeout 1800 curl \
+              --silent \
+              --show-error \
+              --max-time 1800 \
+              --output "$response_file" \
+              --write-out "%{http_code}" \
+              --request PUT \
+              --header "Content-Type: application/json" \
+              --data @"${QDRANT_RESTORE_REPORT_DIR}/recover-body.json" \
+              "${QDRANT_RESTORE_URL}/collections/${collection_url}/snapshots/recover?wait=true"
+          )"
+          curl_exit=$?
+          set -e
+          echo "${status:-curl-exit-${curl_exit}}" > "$status_file"
+          if [[ "$curl_exit" -ne 0 || ! "$status" =~ ^[0-9]{3}$ || "$status" -lt 200 || "$status" -ge 300 ]]; then
+            echo "::error::snapshot recovery failed with HTTP ${status:-unknown} and curl exit ${curl_exit}"
+            cat "$response_file" || true
+            docker logs "$QDRANT_RESTORE_CONTAINER" || true
+            exit 1
+          fi
 
       - name: Verify disposable Qdrant restore
         run: |
@@ -287,13 +302,18 @@ jobs:
           cat "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-result.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload sanitized Qdrant restore drill evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: production-qdrant-restore-drill-${{ github.run_id }}
+          if-no-files-found: warn
           path: |
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-backup-manifest.json
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-plan.json
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-plan.md
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/recover-body.json
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/recover-response.json
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/recover-status.txt
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-report.json
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-result.md
           retention-days: 30
