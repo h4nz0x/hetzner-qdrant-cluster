@@ -1,0 +1,192 @@
+name: Production Qdrant Ansible Check Mode
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type RUN_QDRANT_ANSIBLE_CHECK_MODE"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mongodb-infra-workflows
+  cancel-in-progress: false
+
+env:
+  ANSIBLE_NOCOLOR: "1"
+  ANSIBLE_COLLECTIONS_PATH: ${{ github.workspace }}/ansible/collections
+
+jobs:
+  validate:
+    name: 1. Validate Qdrant Ansible check request
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, mongodb-infra]
+    steps:
+      - name: Validate explicit confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          if [[ "$CONFIRMATION" != "RUN_QDRANT_ANSIBLE_CHECK_MODE" ]]; then
+            echo "::error::confirmation must be exactly RUN_QDRANT_ANSIBLE_CHECK_MODE"
+            exit 1
+          fi
+
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install validation dependencies
+        run: |
+          rm -rf "${RUNNER_TEMP}/qdrant-ansible-check-venv"
+          python -m venv "${RUNNER_TEMP}/qdrant-ansible-check-venv"
+          echo "${RUNNER_TEMP}/qdrant-ansible-check-venv/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/qdrant-ansible-check-venv/bin/pip" install \
+            "ansible-core>=2.16,<2.20" \
+            "ansible-lint>=24.0,<26.0"
+
+      - name: Install Ansible collections
+        run: |
+          rm -rf ansible/collections
+          ansible-galaxy collection install \
+            -r ansible/requirements.yml \
+            -p ansible/collections
+
+      - name: Validate Qdrant Ansible safeguards
+        working-directory: ansible
+        run: |
+          set -euo pipefail
+          python3 ../tests/qdrant-design-test.py
+          python3 ../tests/qdrant-live-audit-test.py
+          python3 ../tests/qdrant-runtime-audit-test.py
+          python3 ../tests/qdrant-backup-test.py
+          python3 ../tests/qdrant-restore-drill-test.py
+          python3 ../tests/qdrant-ansible-check-mode-test.py
+          ansible-lint --offline --format=pep8 playbooks/qdrant-check-mode.yml
+          ansible-playbook \
+            -i inventories/qdrant-production \
+            playbooks/qdrant-check-mode.yml \
+            --syntax-check
+
+  check:
+    name: 2. Render Qdrant Ansible diffs
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, mongodb-infra]
+    environment: production
+    timeout-minutes: 20
+    steps:
+      - name: Check out approved main revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible
+        run: |
+          rm -rf "${RUNNER_TEMP}/qdrant-ansible-check-venv"
+          python -m venv "${RUNNER_TEMP}/qdrant-ansible-check-venv"
+          echo "${RUNNER_TEMP}/qdrant-ansible-check-venv/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/qdrant-ansible-check-venv/bin/pip" install \
+            "ansible-core>=2.16,<2.20"
+
+      - name: Install Ansible collections
+        run: |
+          rm -rf ansible/collections
+          ansible-galaxy collection install \
+            -r ansible/requirements.yml \
+            -p ansible/collections
+
+      - name: Prepare isolated SSH configuration
+        env:
+          QDRANT_SSH_PRIVATE_KEY: ${{ secrets.QDRANT_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$QDRANT_SSH_PRIVATE_KEY" || {
+            echo "::error::QDRANT_SSH_PRIVATE_KEY is not configured"
+            exit 1
+          }
+
+          ssh_dir="${RUNNER_TEMP}/production-qdrant-ansible-check-ssh"
+          key_file="${ssh_dir}/qdrant_ansible_check"
+          known_hosts_file="${ssh_dir}/known_hosts"
+          config_file="${ssh_dir}/config"
+          install -d -m 0700 "$ssh_dir"
+          printf '%s\n' "$QDRANT_SSH_PRIVATE_KEY" > "$key_file"
+          chmod 0600 "$key_file"
+          install -m 0600 /dev/null "$known_hosts_file"
+
+          cat > "$config_file" <<EOF
+          Host *
+            User root
+            IdentityFile ${key_file}
+            IdentitiesOnly yes
+            UserKnownHostsFile ${known_hosts_file}
+            StrictHostKeyChecking yes
+            ControlMaster no
+            ControlPath none
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
+          EOF
+          chmod 0600 "$config_file"
+
+          ssh-keyscan -T 10 -t ed25519 \
+            203.0.113.11 203.0.113.12 203.0.113.13 \
+            2>/dev/null >> "$known_hosts_file"
+          for host in 203.0.113.11 203.0.113.12 203.0.113.13; do
+            ssh-keygen -F "$host" -f "$known_hosts_file" >/dev/null || {
+              echo "::error::Could not obtain SSH host key for ${host}"
+              exit 1
+            }
+          done
+
+          echo "ANSIBLE_SSH_ARGS=-F ${config_file}" >> "$GITHUB_ENV"
+
+      - name: Run Qdrant Ansible check mode
+        working-directory: ansible
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP}/production-qdrant-ansible-check.log"
+
+          ansible-playbook \
+            -i inventories/qdrant-production \
+            playbooks/qdrant-check-mode.yml \
+            --check \
+            --diff \
+            | tee "$log_file"
+
+          {
+            echo '### Production Qdrant Ansible check mode'
+            echo
+            echo 'Render-only check; no containers were restarted and no Terraform ran.'
+            echo
+            echo '```text'
+            cat "$log_file"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized Qdrant Ansible check evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-qdrant-ansible-check-${{ github.run_id }}
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/production-qdrant-ansible-check.log
+          retention-days: 14
+
+      - name: Remove temporary Qdrant Ansible material
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/production-qdrant-ansible-check-ssh"

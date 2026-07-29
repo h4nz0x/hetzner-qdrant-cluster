@@ -215,6 +215,8 @@ Required alerts before declaring Qdrant managed:
    - The first role PR should render the current compose model byte-for-byte
      where possible.
    - Run `ansible-playbook --check --diff` only.
+   - Workflow/runbook:
+     [qdrant-ansible-check-mode.md](runbooks/qdrant-ansible-check-mode.md).
 
 4. Add backup automation.
    - Snapshot all collections.
