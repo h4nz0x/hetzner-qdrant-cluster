@@ -142,6 +142,10 @@ class QdrantRestoreDrillTest(unittest.TestCase):
             "docker run",
             "snapshots/recover?wait=true",
             '"priority": "snapshot"',
+            'chmod 0777 "$snapshot_dir"',
+            '--volume "${QDRANT_RESTORE_SNAPSHOT_DIR}:/qdrant/snapshots"',
+            "alpine:3.20",
+            "/cleanup-target",
             "scripts/qdrant-restore-drill.py",
             "python3 tests/qdrant-restore-drill-test.py",
             "production-qdrant-restore-drill-${{ github.run_id }}",
@@ -156,6 +160,7 @@ class QdrantRestoreDrillTest(unittest.TestCase):
             "terraform apply",
             "ansible-playbook",
             "docker compose",
+            ':/qdrant/snapshots:ro',
         ):
             self.assertNotIn(forbidden, workflow)
 

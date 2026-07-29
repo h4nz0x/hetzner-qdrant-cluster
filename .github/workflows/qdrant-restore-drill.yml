@@ -133,7 +133,8 @@ jobs:
           snapshot_dir="${drill_dir}/snapshots"
           storage_dir="${drill_dir}/storage"
           install -d -m 0700 "$report_dir" "$snapshot_dir" "$storage_dir"
-          chmod 0755 "$drill_dir" "$snapshot_dir"
+          chmod 0755 "$drill_dir"
+          chmod 0777 "$snapshot_dir"
           chmod 0777 "$storage_dir"
           {
             echo "QDRANT_RESTORE_DRILL_DIR=${drill_dir}"
@@ -219,7 +220,7 @@ jobs:
             --detach \
             --name "$container_name" \
             --publish "127.0.0.1:${port}:6333" \
-            --volume "${QDRANT_RESTORE_SNAPSHOT_DIR}:/qdrant/snapshots:ro" \
+            --volume "${QDRANT_RESTORE_SNAPSHOT_DIR}:/qdrant/snapshots" \
             --volume "${QDRANT_RESTORE_STORAGE_DIR}:/qdrant/storage" \
             "$RESTORE_IMAGE"
 
@@ -303,4 +304,12 @@ jobs:
           if [[ -n "${QDRANT_RESTORE_CONTAINER:-}" ]]; then
             docker rm -f "$QDRANT_RESTORE_CONTAINER" >/dev/null 2>&1 || true
           fi
-          rm -rf "${QDRANT_RESTORE_DRILL_DIR:-/tmp/unused-qdrant-restore-drill}"
+          if [[ -n "${QDRANT_RESTORE_DRILL_DIR:-}" && -d "$QDRANT_RESTORE_DRILL_DIR" ]]; then
+            docker run \
+              --rm \
+              --volume "${QDRANT_RESTORE_DRILL_DIR}:/cleanup-target" \
+              alpine:3.20 \
+              sh -c 'rm -rf /cleanup-target/* /cleanup-target/.[!.]* /cleanup-target/..?*' \
+              >/dev/null 2>&1 || true
+            rm -rf "$QDRANT_RESTORE_DRILL_DIR"
+          fi
