@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SCRIPT = ROOT / "scripts" / "qdrant-backup-manifest.py"
 RETENTION_SCRIPT = ROOT / "scripts" / "qdrant-s3-retention-plan.py"
 NODE_SCRIPT = ROOT / "scripts" / "qdrant-backup-node.sh"
+RUNBOOK = ROOT / "docs" / "runbooks" / "qdrant-snapshot-backup.md"
 WORKFLOW = ROOT / ".github/workflows/production-qdrant-snapshot-backup.yml"
 
 
@@ -132,12 +133,15 @@ class QdrantBackupTest(unittest.TestCase):
         for forbidden in ("DELETE", "snapshots/delete", "rm -rf", "docker"):
             self.assertNotIn(forbidden, script)
 
-    def test_workflow_is_manual_protected_and_uses_two_backup_retention(self) -> None:
+    def test_workflow_runs_manual_and_scheduled_backups_with_two_set_retention(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         for required in (
+            'cron: "0 */12 * * *"',
             "workflow_dispatch:",
             "CREATE_QDRANT_S3_SNAPSHOT_BACKUP",
-            "environment: production",
+            "EVENT_NAME: ${{ github.event_name }}",
+            "backup-manual:",
+            "backup-scheduled:",
             "QDRANT_SSH_PRIVATE_KEY: ${{ secrets.QDRANT_SSH_PRIVATE_KEY }}",
             "QDRANT_BACKUP_AWS_ACCESS_KEY_ID",
             "QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY",
@@ -145,14 +149,40 @@ class QdrantBackupTest(unittest.TestCase):
             "QDRANT_BACKUP_S3_PREFIX",
             "python3 tests/qdrant-backup-test.py",
             "scripts/qdrant-backup-node.sh",
+            "scripts/qdrant-snapshot-backup.sh",
+            "shellcheck --severity=warning scripts/qdrant-snapshot-backup.sh",
+            "bash scripts/qdrant-snapshot-backup.sh",
+            "github.event_name == 'workflow_dispatch'",
+            "github.event_name == 'schedule'",
+        ):
+            self.assertIn(required, workflow)
+
+        manual_job = workflow.split("  backup-manual:", 1)[1].split("  backup-scheduled:", 1)[0]
+        scheduled_job = workflow.split("  backup-scheduled:", 1)[1]
+        self.assertIn("environment: production", manual_job)
+        self.assertNotIn("environment:", scheduled_job)
+
+        script = (ROOT / "scripts" / "qdrant-snapshot-backup.sh").read_text(encoding="utf-8")
+        for required in (
+            "QDRANT_SSH_PRIVATE_KEY",
             "scripts/qdrant-backup-manifest.py",
             "scripts/qdrant-s3-retention-plan.py",
             "--keep 2",
         ):
-            self.assertIn(required, workflow)
+            self.assertIn(required, script)
 
         for forbidden in ("ansible-playbook", "terraform apply", "docker compose"):
             self.assertNotIn(forbidden, workflow)
+            self.assertNotIn(forbidden, script)
+
+        runbook = RUNBOOK.read_text(encoding="utf-8")
+        for required in (
+            "automatic production backup every 12 hours",
+            "0 */12 * * *",
+            "repository secrets for the scheduled path",
+            "latest two completed backup sets",
+        ):
+            self.assertIn(required, runbook)
 
 
 if __name__ == "__main__":
