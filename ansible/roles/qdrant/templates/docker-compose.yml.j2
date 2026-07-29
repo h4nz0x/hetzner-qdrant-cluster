@@ -1,0 +1,42 @@
+services:
+  qdrant_node{{ qdrant_node_id }}:
+    image: {{ qdrant_image }}
+    container_name: qdrant_node{{ qdrant_node_id }}
+    restart: unless-stopped
+    volumes:
+      - "{{ qdrant_data_dir }}:/qdrant/storage"
+    ports:
+      - "{{ qdrant_http_port }}:6333" # HTTP
+      - "{{ qdrant_grpc_port }}:6334" # gRPC
+      - "{{ qdrant_cluster_port }}:6335" # cluster
+    environment:
+      QDRANT__CLUSTER__ENABLED: "true"
+      QDRANT__LOG_LEVEL: "{{ qdrant_log_level }}"
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY is required}"
+{% if qdrant_private_ip != qdrant_bootstrap_private_ip %}
+    command:
+      - ./qdrant
+      - --bootstrap
+      - http://{{ qdrant_bootstrap_private_ip }}:6335
+      - --uri
+      - http://{{ qdrant_private_ip }}:6335
+{% else %}
+    command:
+      - ./qdrant
+      - --uri
+      - http://{{ qdrant_private_ip }}:6335
+{% endif %}
+
+  metrics_proxy:
+    image: {{ qdrant_metrics_proxy_image }}
+    container_name: qdrant_metrics_proxy
+    restart: unless-stopped
+    depends_on:
+      - qdrant_node{{ qdrant_node_id }}
+    environment:
+      QDRANT_UPSTREAM: "qdrant_node{{ qdrant_node_id }}:6333"
+      QDRANT_API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY is required}"
+    ports:
+      - "{{ qdrant_metrics_port }}:6336"
+    volumes:
+      - ./metrics-proxy/nginx.conf.template:/etc/nginx/templates/metrics-proxy.conf.template:ro

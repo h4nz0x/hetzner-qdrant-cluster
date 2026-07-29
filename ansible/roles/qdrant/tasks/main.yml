@@ -1,0 +1,52 @@
+---
+- name: Refuse Qdrant role outside Ansible check mode
+  ansible.builtin.assert:
+    that:
+      - ansible_check_mode
+    fail_msg: >-
+      The first Qdrant Ansible role is render-only. Run with --check --diff;
+      do not apply it to live Qdrant nodes yet.
+    success_msg: Qdrant render-only guard passed.
+
+- name: Validate Qdrant inventory variables
+  ansible.builtin.assert:
+    that:
+      - qdrant_node_id in [1, 2, 3]
+      - qdrant_private_ip is match('^10[.]2[.]0[.][0-9]+$')
+      - qdrant_bootstrap_private_ip is match('^10[.]2[.]0[.][0-9]+$')
+      - qdrant_data_dir is match('^/mnt/HC_Volume_[0-9]+/qdrant$')
+      - qdrant_image is match('^qdrant/qdrant:v[0-9]+[.][0-9]+[.][0-9]+$')
+      - qdrant_metrics_proxy_image is match('^nginx:[0-9]+[.][0-9]+-alpine$')
+    fail_msg: >-
+      Qdrant inventory does not match the reviewed three-node live topology.
+
+- name: Check Qdrant secret environment file presence
+  ansible.builtin.stat:
+    path: "{{ qdrant_env_file }}"
+  register: qdrant_env_file_stat
+  changed_when: false
+
+- name: Require existing Qdrant secret environment file
+  ansible.builtin.assert:
+    that:
+      - qdrant_env_file_stat.stat.exists
+      - qdrant_env_file_stat.stat.isreg
+    fail_msg: >-
+      {{ qdrant_env_file }} is missing. This role does not create Qdrant API
+      keys or Grafana credentials; it only renders non-secret config diffs.
+
+- name: Render Qdrant docker compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ qdrant_compose_dir }}/docker-compose.yml"
+    owner: qdrant
+    group: qdrant
+    mode: "0644"
+
+- name: Render Qdrant metrics proxy template
+  ansible.builtin.template:
+    src: metrics-proxy.conf.template.j2
+    dest: "{{ qdrant_metrics_proxy_dir }}/nginx.conf.template"
+    owner: qdrant
+    group: qdrant
+    mode: "0644"
