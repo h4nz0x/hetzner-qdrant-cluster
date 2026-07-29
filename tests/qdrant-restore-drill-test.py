@@ -103,6 +103,19 @@ class QdrantRestoreDrillTest(unittest.TestCase):
         self.assertEqual(RESTORE.scroll_count({"result": {"points": [{"id": 1}]}}), 1)
         self.assertEqual(RESTORE.scroll_count({"result": {"points": []}}), 0)
 
+        summary = RESTORE.render_verify_summary(
+            {
+                "passed": True,
+                "collection": "example_collection",
+                "api_status": "ok",
+                "collection_status": "green",
+                "points_count": 42,
+                "sample_points_returned": 1,
+            }
+        )
+        self.assertIn("API status", summary)
+        self.assertNotIn("Readiness", summary)
+
     def test_cli_plan_writes_sanitized_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -143,6 +156,12 @@ class QdrantRestoreDrillTest(unittest.TestCase):
             '${restore_url}/collections',
             "snapshots/recover?wait=true",
             '"priority": "snapshot"',
+            "recover-response.json",
+            "recover-status.txt",
+            "snapshot recovery failed with HTTP",
+            "curl exit",
+            "if: always()",
+            "if-no-files-found: warn",
             'chmod 0777 "$snapshot_dir"',
             '--volume "${QDRANT_RESTORE_SNAPSHOT_DIR}:/qdrant/snapshots"',
             "alpine:3.20",

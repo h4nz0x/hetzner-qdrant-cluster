@@ -179,23 +179,23 @@ def verify_restore(qdrant_url: str, collection: str) -> dict[str, Any]:
     collection = require_safe(collection, "collection")
     base_url = qdrant_url.rstrip("/")
     encoded = urllib.parse.quote(collection, safe="")
-    readiness = url_json("GET", f"{base_url}/readiness")
+    collections = url_json("GET", f"{base_url}/collections")
     collection_info = url_json("GET", f"{base_url}/collections/{encoded}")
     scroll_body = json.dumps(
         {"limit": 1, "with_payload": False, "with_vector": False}
     ).encode("utf-8")
     scroll = url_json("POST", f"{base_url}/collections/{encoded}/points/scroll", scroll_body)
 
-    readiness_status = None
-    if isinstance(readiness, dict):
-        status = readiness.get("status")
-        readiness_status = str(status).lower() if status is not None else None
+    api_status = None
+    if isinstance(collections, dict):
+        status = collections.get("status")
+        api_status = str(status).lower() if status is not None else None
 
     status = collection_status(collection_info)
     points = collection_points(collection_info)
     sample_points = scroll_count(scroll)
     passed = (
-        readiness_status == "ok"
+        api_status == "ok"
         and status in {"green", "yellow"}
         and points is not None
         and points > 0
@@ -204,7 +204,7 @@ def verify_restore(qdrant_url: str, collection: str) -> dict[str, Any]:
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "collection": collection,
-        "readiness_status": readiness_status,
+        "api_status": api_status,
         "collection_status": status,
         "points_count": points,
         "sample_points_returned": sample_points,
@@ -236,7 +236,7 @@ def render_verify_summary(report: dict[str, Any]) -> str:
             "",
             f"- Result: `{verdict}`",
             f"- Collection: `{report['collection']}`",
-            f"- Readiness: `{report['readiness_status']}`",
+            f"- API status: `{report['api_status']}`",
             f"- Collection status: `{report['collection_status']}`",
             f"- Points count: `{report['points_count']}`",
             f"- Sample points returned: `{report['sample_points_returned']}`",
