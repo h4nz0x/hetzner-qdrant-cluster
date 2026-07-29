@@ -140,6 +140,7 @@ class QdrantRestoreDrillTest(unittest.TestCase):
             "environment: production",
             "qdrant/qdrant:v1.17.0",
             "docker run",
+            '${restore_url}/collections',
             "snapshots/recover?wait=true",
             '"priority": "snapshot"',
             'chmod 0777 "$snapshot_dir"',
@@ -161,6 +162,7 @@ class QdrantRestoreDrillTest(unittest.TestCase):
             "ansible-playbook",
             "docker compose",
             ':/qdrant/snapshots:ro',
+            "${restore_url}/readiness",
         ):
             self.assertNotIn(forbidden, workflow)
 
