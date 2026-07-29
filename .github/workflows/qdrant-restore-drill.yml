@@ -13,7 +13,7 @@ on:
         type: string
       source_node:
         default: "qdrant-node-1"
-        description: "Manifest node snapshot to restore into the disposable target"
+        description: "Deprecated; distributed restore drills use all manifest node snapshots"
         required: true
         type: string
       collection:
@@ -86,7 +86,6 @@ jobs:
       QDRANT_BACKUP_S3_BUCKET: ${{ secrets.QDRANT_BACKUP_S3_BUCKET }}
       QDRANT_BACKUP_S3_PREFIX: ${{ secrets.QDRANT_BACKUP_S3_PREFIX }}
       RESTORE_BACKUP_ID: ${{ inputs.backup_id }}
-      RESTORE_SOURCE_NODE: ${{ inputs.source_node }}
       RESTORE_COLLECTION: ${{ inputs.collection }}
       RESTORE_IMAGE: qdrant/qdrant:v1.17.0
     steps:
@@ -104,25 +103,21 @@ jobs:
             AWS_DEFAULT_REGION \
             QDRANT_BACKUP_S3_BUCKET \
             QDRANT_BACKUP_S3_PREFIX \
-            RESTORE_BACKUP_ID \
-            RESTORE_SOURCE_NODE; do
+            RESTORE_BACKUP_ID; do
             if [[ -z "${!name}" ]]; then
               echo "::error::${name} is not configured"
               exit 1
             fi
           done
 
-          python3 - "$RESTORE_BACKUP_ID" "$RESTORE_SOURCE_NODE" <<'PY'
+          python3 - "$RESTORE_BACKUP_ID" <<'PY'
           import re
           import sys
 
-          backup_id, source_node = sys.argv[1:3]
+          backup_id = sys.argv[1]
           backup_id_pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
-          safe_name = r"^[A-Za-z0-9_.:-]+$"
           if not re.fullmatch(backup_id_pattern, backup_id):
               raise SystemExit("backup_id must be an exact UTC timestamp")
-          if not re.fullmatch(safe_name, source_node):
-              raise SystemExit("source_node contains unsupported characters")
           PY
 
       - name: Prepare disposable restore drill workspace
@@ -136,6 +131,9 @@ jobs:
           chmod 0755 "$drill_dir"
           chmod 0777 "$snapshot_dir"
           chmod 0777 "$storage_dir"
+          for node in qdrant-node-1 qdrant-node-2 qdrant-node-3; do
+            install -d -m 0777 "${snapshot_dir}/${node}" "${storage_dir}/${node}"
+          done
           {
             echo "QDRANT_RESTORE_DRILL_DIR=${drill_dir}"
             echo "QDRANT_RESTORE_REPORT_DIR=${report_dir}"
@@ -158,7 +156,6 @@ jobs:
             plan
             --manifest "${QDRANT_RESTORE_REPORT_DIR}/qdrant-backup-manifest.json"
             --backup-id "$RESTORE_BACKUP_ID"
-            --source-node "$RESTORE_SOURCE_NODE"
             --snapshot-dir "$QDRANT_RESTORE_SNAPSHOT_DIR"
             --output-json "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-plan.json"
             --output-md "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-plan.md"
@@ -168,40 +165,49 @@ jobs:
           fi
           python3 scripts/qdrant-restore-drill.py "${plan_args[@]}"
 
-      - name: Download selected Qdrant snapshot from S3
+      - name: Download Qdrant node snapshots from S3
         run: |
           set -euo pipefail
           plan_file="${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-plan.json"
-          s3_key="$(
-            python3 -c \
-              'import json,sys; print(json.load(open(sys.argv[1]))["s3_key"])' \
-              "$plan_file"
-          )"
-          snapshot_file="$(
-            python3 -c \
-              'import json,sys; print(json.load(open(sys.argv[1]))["local_snapshot_path"])' \
-              "$plan_file"
-          )"
-          expected_size="$(
-            python3 -c \
-              'import json,sys; print(json.load(open(sys.argv[1]))["expected_size"])' \
-              "$plan_file"
-          )"
-          install -d -m 0755 "$(dirname "$snapshot_file")"
+          download_tsv="${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-download.tsv"
+          python3 - "$plan_file" > "$download_tsv" <<'PY'
+          import json
+          import sys
 
-          aws s3 cp "s3://${QDRANT_BACKUP_S3_BUCKET}/${s3_key}" "$snapshot_file"
-          chmod 0644 "$snapshot_file"
-          actual_size="$(stat -c '%s' "$snapshot_file")"
-          if [[ "$actual_size" != "$expected_size" ]]; then
-            echo "::error::snapshot size mismatch: expected ${expected_size}, got ${actual_size}"
-            exit 1
-          fi
+          plan = json.load(open(sys.argv[1], encoding="utf-8"))
+          for item in plan["snapshots"]:
+              print(
+                  "\t".join(
+                      [
+                          item["node"],
+                          item["s3_key"],
+                          item["local_snapshot_path"],
+                          str(item["expected_size"]),
+                      ]
+                  )
+              )
+          PY
 
-      - name: Start disposable Qdrant restore target
+          while IFS=$'\t' read -r node s3_key snapshot_file expected_size; do
+            install -d -m 0755 "$(dirname "$snapshot_file")"
+            aws s3 cp "s3://${QDRANT_BACKUP_S3_BUCKET}/${s3_key}" "$snapshot_file"
+            chmod 0644 "$snapshot_file"
+            actual_size="$(stat -c '%s' "$snapshot_file")"
+            if [[ "$actual_size" != "$expected_size" ]]; then
+              echo "::error::${node} snapshot size mismatch: expected ${expected_size}, got ${actual_size}"
+              exit 1
+            fi
+          done < "$download_tsv"
+
+      - name: Start disposable Qdrant restore cluster
         run: |
           set -euo pipefail
-          container_name="qdrant-restore-drill-${GITHUB_RUN_ID}"
-          port="$(
+          network_name="qdrant-restore-drill-${GITHUB_RUN_ID}"
+          urls_tsv="${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-urls.tsv"
+          echo "QDRANT_RESTORE_NETWORK=${network_name}" >> "$GITHUB_ENV"
+          echo "QDRANT_RESTORE_URLS_FILE=${urls_tsv}" >> "$GITHUB_ENV"
+
+          next_port() {
             python3 - <<'PY'
           import socket
 
@@ -209,32 +215,76 @@ jobs:
               sock.bind(("127.0.0.1", 0))
               print(sock.getsockname()[1])
           PY
-          )"
-          restore_url="http://127.0.0.1:${port}"
-          echo "QDRANT_RESTORE_CONTAINER=${container_name}" >> "$GITHUB_ENV"
-          echo "QDRANT_RESTORE_URL=${restore_url}" >> "$GITHUB_ENV"
+          }
 
-          docker rm -f "$container_name" >/dev/null 2>&1 || true
+          docker network rm "$network_name" >/dev/null 2>&1 || true
+          docker network create "$network_name" >/dev/null
           docker image inspect "$RESTORE_IMAGE" >/dev/null 2>&1 || docker pull "$RESTORE_IMAGE"
-          docker run \
-            --detach \
-            --name "$container_name" \
-            --publish "127.0.0.1:${port}:6333" \
-            --volume "${QDRANT_RESTORE_SNAPSHOT_DIR}:/qdrant/snapshots" \
-            --volume "${QDRANT_RESTORE_STORAGE_DIR}:/qdrant/storage" \
-            "$RESTORE_IMAGE"
+
+          : > "$urls_tsv"
+          for node in qdrant-node-1 qdrant-node-2 qdrant-node-3; do
+            ordinal="${node#qdrant-node-}"
+            hostname="qdrant-drill-node-${ordinal}"
+            container_name="qdrant-restore-drill-${GITHUB_RUN_ID}-${node}"
+            port="$(next_port)"
+            restore_url="http://127.0.0.1:${port}"
+            args=(./qdrant --uri "http://${hostname}:6335")
+            if [[ "$node" != "qdrant-node-1" ]]; then
+              args=(./qdrant --bootstrap "http://qdrant-drill-node-1:6335" --uri "http://${hostname}:6335")
+            fi
+
+            docker rm -f "$container_name" >/dev/null 2>&1 || true
+            docker run \
+              --detach \
+              --name "$container_name" \
+              --hostname "$hostname" \
+              --network "$network_name" \
+              --publish "127.0.0.1:${port}:6333" \
+              --volume "${QDRANT_RESTORE_SNAPSHOT_DIR}/${node}:/qdrant/snapshots" \
+              --volume "${QDRANT_RESTORE_STORAGE_DIR}/${node}:/qdrant/storage" \
+              --env QDRANT__CLUSTER__ENABLED=true \
+              --env QDRANT__CLUSTER__P2P__PORT=6335 \
+              "$RESTORE_IMAGE" \
+              "${args[@]}"
+
+            printf '%s\t%s\t%s\n' "$node" "$container_name" "$restore_url" >> "$urls_tsv"
+
+            for _ in $(seq 1 90); do
+              if curl --fail --silent --show-error "${restore_url}/collections" >/dev/null; then
+                break
+              fi
+              sleep 2
+            done
+            curl --fail --silent --show-error "${restore_url}/collections" >/dev/null
+          done
 
           for _ in $(seq 1 90); do
-            if curl --fail --silent --show-error "${restore_url}/collections" >/dev/null; then
+            if python3 - "$urls_tsv" <<'PY'
+          import json
+          import sys
+          import urllib.request
+
+          urls = [line.rstrip("\n").split("\t")[2] for line in open(sys.argv[1], encoding="utf-8")]
+          for url in urls:
+              with urllib.request.urlopen(f"{url}/collections", timeout=5) as response:
+                  json.load(response)
+          with urllib.request.urlopen(f"{urls[0]}/cluster", timeout=5) as response:
+              cluster = json.load(response)
+          peers = cluster.get("result", {}).get("peers", {})
+          raise SystemExit(0 if len(peers) >= 3 else 1)
+          PY
+            then
               exit 0
             fi
             sleep 2
           done
-          echo "::error::disposable Qdrant did not become ready"
-          docker logs "$container_name" || true
+          echo "::error::disposable Qdrant cluster did not become ready"
+          while IFS=$'\t' read -r _node container_name _url; do
+            docker logs "$container_name" || true
+          done < "$urls_tsv"
           exit 1
 
-      - name: Restore selected snapshot into disposable Qdrant
+      - name: Restore node snapshots into disposable Qdrant cluster
         run: |
           set -euo pipefail
           plan_file="${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-plan.json"
@@ -247,42 +297,57 @@ jobs:
               'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' \
               "$collection"
           )"
-          file_uri="$(
-            python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["qdrant_file_uri"])' \
-              "$plan_file"
-          )"
-
-          python3 - "$file_uri" > "${QDRANT_RESTORE_REPORT_DIR}/recover-body.json" <<'PY'
+          upload_tsv="${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-upload.tsv"
+          python3 - "$plan_file" "$QDRANT_RESTORE_URLS_FILE" > "$upload_tsv" <<'PY'
           import json
           import sys
 
-          print(json.dumps({"location": sys.argv[1], "priority": "snapshot"}))
+          plan = json.load(open(sys.argv[1], encoding="utf-8"))
+          urls = {}
+          containers = {}
+          for line in open(sys.argv[2], encoding="utf-8"):
+              node, container, url = line.rstrip("\n").split("\t")
+              urls[node] = url
+              containers[node] = container
+          for item in plan["snapshots"]:
+              node = item["node"]
+              print(
+                  "\t".join(
+                      [
+                          node,
+                          containers[node],
+                          urls[node],
+                          item["local_snapshot_path"],
+                      ]
+                  )
+              )
           PY
 
-          response_file="${QDRANT_RESTORE_REPORT_DIR}/recover-response.json"
-          status_file="${QDRANT_RESTORE_REPORT_DIR}/recover-status.txt"
-          set +e
-          status="$(
-            timeout 1800 curl \
-              --silent \
-              --show-error \
-              --max-time 1800 \
-              --output "$response_file" \
-              --write-out "%{http_code}" \
-              --request PUT \
-              --header "Content-Type: application/json" \
-              --data @"${QDRANT_RESTORE_REPORT_DIR}/recover-body.json" \
-              "${QDRANT_RESTORE_URL}/collections/${collection_url}/snapshots/recover?wait=true"
-          )"
-          curl_exit=$?
-          set -e
-          echo "${status:-curl-exit-${curl_exit}}" > "$status_file"
-          if [[ "$curl_exit" -ne 0 || ! "$status" =~ ^[0-9]{3}$ || "$status" -lt 200 || "$status" -ge 300 ]]; then
-            echo "::error::snapshot recovery failed with HTTP ${status:-unknown} and curl exit ${curl_exit}"
-            cat "$response_file" || true
-            docker logs "$QDRANT_RESTORE_CONTAINER" || true
-            exit 1
-          fi
+          while IFS=$'\t' read -r node container_name restore_url snapshot_file; do
+            response_file="${QDRANT_RESTORE_REPORT_DIR}/recover-${node}-response.json"
+            status_file="${QDRANT_RESTORE_REPORT_DIR}/recover-${node}-status.txt"
+            set +e
+            status="$(
+              timeout 1800 curl \
+                --silent \
+                --show-error \
+                --max-time 1800 \
+                --output "$response_file" \
+                --write-out "%{http_code}" \
+                --request POST \
+                --form "snapshot=@${snapshot_file}" \
+                "${restore_url}/collections/${collection_url}/snapshots/upload?wait=true&priority=snapshot"
+            )"
+            curl_exit=$?
+            set -e
+            echo "${status:-curl-exit-${curl_exit}}" > "$status_file"
+            if [[ "$curl_exit" -ne 0 || ! "$status" =~ ^[0-9]{3}$ || "$status" -lt 200 || "$status" -ge 300 ]]; then
+              echo "::error::${node} snapshot recovery failed with HTTP ${status:-unknown} and curl exit ${curl_exit}"
+              cat "$response_file" || true
+              docker logs "$container_name" || true
+              exit 1
+            fi
+          done < "$upload_tsv"
 
       - name: Verify disposable Qdrant restore
         run: |
@@ -292,11 +357,26 @@ jobs:
             python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["collection"])' \
               "$plan_file"
           )"
-          python3 scripts/qdrant-restore-drill.py verify \
-            --qdrant-url "$QDRANT_RESTORE_URL" \
-            --collection "$collection" \
-            --output-json "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-report.json" \
-            --output-md "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-result.md"
+          restore_url="$(awk -F '\t' '$1 == "qdrant-node-1" {print $3}' "$QDRANT_RESTORE_URLS_FILE")"
+          verified=0
+          for _ in $(seq 1 60); do
+            if python3 scripts/qdrant-restore-drill.py verify \
+              --qdrant-url "$restore_url" \
+              --collection "$collection" \
+              --output-json "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-report.json" \
+              --output-md "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-result.md"; then
+              verified=1
+              break
+            fi
+            sleep 10
+          done
+          if [[ "$verified" != "1" ]]; then
+            echo "::error::Restore verification did not pass"
+            while IFS=$'\t' read -r _node container_name _url; do
+              docker logs "$container_name" || true
+            done < "$QDRANT_RESTORE_URLS_FILE"
+            exit 1
+          fi
 
           cat "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-plan.md" >> "$GITHUB_STEP_SUMMARY"
           cat "${QDRANT_RESTORE_REPORT_DIR}/qdrant-restore-result.md" >> "$GITHUB_STEP_SUMMARY"
@@ -311,9 +391,11 @@ jobs:
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-backup-manifest.json
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-plan.json
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-plan.md
-            ${{ runner.temp }}/production-qdrant-restore-drill/report/recover-body.json
-            ${{ runner.temp }}/production-qdrant-restore-drill/report/recover-response.json
-            ${{ runner.temp }}/production-qdrant-restore-drill/report/recover-status.txt
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-download.tsv
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-upload.tsv
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-urls.tsv
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/recover-*-response.json
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/recover-*-status.txt
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-report.json
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-result.md
           retention-days: 30
@@ -321,8 +403,11 @@ jobs:
       - name: Remove disposable Qdrant restore drill material
         if: always()
         run: |
-          if [[ -n "${QDRANT_RESTORE_CONTAINER:-}" ]]; then
-            docker rm -f "$QDRANT_RESTORE_CONTAINER" >/dev/null 2>&1 || true
+          for node in qdrant-node-1 qdrant-node-2 qdrant-node-3; do
+            docker rm -f "qdrant-restore-drill-${GITHUB_RUN_ID}-${node}" >/dev/null 2>&1 || true
+          done
+          if [[ -n "${QDRANT_RESTORE_NETWORK:-}" ]]; then
+            docker network rm "$QDRANT_RESTORE_NETWORK" >/dev/null 2>&1 || true
           fi
           if [[ -n "${QDRANT_RESTORE_DRILL_DIR:-}" && -d "$QDRANT_RESTORE_DRILL_DIR" ]]; then
             docker run \

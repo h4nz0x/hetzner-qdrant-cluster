@@ -125,6 +125,92 @@ def select_snapshot(
     }
 
 
+def collection_names(node: dict[str, Any]) -> set[str]:
+    collections = node.get("collections")
+    if not isinstance(collections, list):
+        raise RestoreDrillError("manifest node collections must be a list")
+    names = set()
+    for item in collections:
+        if not isinstance(item, dict):
+            raise RestoreDrillError("manifest contains a malformed collection")
+        name = item.get("collection")
+        if isinstance(name, str):
+            names.add(name)
+    return names
+
+
+def select_snapshot_set(
+    manifest: dict[str, Any],
+    backup_id: str,
+    collection: str | None,
+    snapshot_root: Path,
+) -> dict[str, Any]:
+    if not BACKUP_ID.fullmatch(backup_id):
+        raise RestoreDrillError("backup_id must be an exact UTC timestamp")
+    if manifest.get("backup_id") != backup_id:
+        raise RestoreDrillError("manifest backup_id does not match requested backup_id")
+
+    by_node = node_map(manifest)
+    if collection is None:
+        common = set.intersection(*(collection_names(by_node[node]) for node in EXPECTED_NODES))
+        if not common:
+            raise RestoreDrillError("manifest has no collection snapshot present on every node")
+        collection_name = sorted(common)[0]
+    else:
+        collection_name = require_safe(collection, "collection")
+
+    prefix = str(manifest.get("prefix") or "").strip("/")
+    bucket = str(manifest.get("bucket") or "")
+    if not prefix or not bucket:
+        raise RestoreDrillError("manifest bucket and prefix are required")
+
+    snapshots: list[dict[str, Any]] = []
+    for node_name in EXPECTED_NODES:
+        collections = by_node[node_name].get("collections")
+        if not isinstance(collections, list):
+            raise RestoreDrillError(f"{node_name} collections must be a list")
+        selected = next(
+            (item for item in collections if item.get("collection") == collection_name),
+            None,
+        )
+        if selected is None:
+            raise RestoreDrillError(
+                f"{node_name} has no snapshot for collection {collection_name}"
+            )
+        if not isinstance(selected, dict):
+            raise RestoreDrillError(f"{node_name} selected snapshot is malformed")
+        snapshot_name = require_safe(selected.get("snapshot_name"), "snapshot_name")
+        size = selected.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            raise RestoreDrillError(f"{node_name} selected snapshot has invalid size")
+        s3_key = (
+            f"{prefix}/{backup_id}/nodes/{node_name}/collections/"
+            f"{collection_name}/{snapshot_name}"
+        )
+        snapshots.append(
+            {
+                "node": node_name,
+                "collection": collection_name,
+                "snapshot_name": snapshot_name,
+                "expected_size": size,
+                "checksum": selected.get("checksum"),
+                "creation_time": selected.get("creation_time"),
+                "s3_key": s3_key,
+                "local_snapshot_path": str(snapshot_root / node_name / snapshot_name),
+            }
+        )
+
+    return {
+        "backup_id": backup_id,
+        "bucket": bucket,
+        "prefix": prefix,
+        "collection": collection_name,
+        "nodes": list(EXPECTED_NODES),
+        "snapshots": snapshots,
+        "total_expected_size": sum(item["expected_size"] for item in snapshots),
+    }
+
+
 def url_json(
     method: str,
     url: str,
@@ -228,6 +314,30 @@ def render_plan_summary(plan: dict[str, Any]) -> str:
     )
 
 
+def render_snapshot_set_summary(plan: dict[str, Any]) -> str:
+    lines = [
+        "# Qdrant distributed restore drill plan",
+        "",
+        f"- Backup ID: `{plan['backup_id']}`",
+        f"- Collection: `{plan['collection']}`",
+        f"- Nodes: {len(plan['snapshots'])}",
+        f"- Total expected size: {plan['total_expected_size']} bytes",
+        "",
+        "| Node | Snapshot | Expected size | S3 object |",
+        "| --- | --- | ---: | --- |",
+    ]
+    for item in plan["snapshots"]:
+        lines.append(
+            "| "
+            f"`{item['node']}` | "
+            f"`{item['snapshot_name']}` | "
+            f"{item['expected_size']} | "
+            f"`s3://{plan['bucket']}/{item['s3_key']}` |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_verify_summary(report: dict[str, Any]) -> str:
     verdict = "passed" if report["passed"] else "failed"
     return "\n".join(
@@ -247,17 +357,16 @@ def render_verify_summary(report: dict[str, Any]) -> str:
 
 def plan_command(args: argparse.Namespace) -> int:
     manifest = read_json(args.manifest)
-    plan = select_snapshot(
+    plan = select_snapshot_set(
         manifest,
         args.backup_id,
-        args.source_node,
         args.collection,
         args.snapshot_dir,
     )
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_md.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(plan, indent=2, sort_keys=True), encoding="utf-8")
-    args.output_md.write_text(render_plan_summary(plan), encoding="utf-8")
+    args.output_md.write_text(render_snapshot_set_summary(plan), encoding="utf-8")
     return 0
 
 
@@ -279,7 +388,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     plan = subcommands.add_parser("plan", help="Build a restore drill plan")
     plan.add_argument("--manifest", type=Path, required=True)
     plan.add_argument("--backup-id", required=True)
-    plan.add_argument("--source-node", default="qdrant-node-1")
+    plan.add_argument("--source-node", default="qdrant-node-1", help=argparse.SUPPRESS)
     plan.add_argument("--collection")
     plan.add_argument("--snapshot-dir", type=Path, required=True)
     plan.add_argument("--output-json", type=Path, required=True)
