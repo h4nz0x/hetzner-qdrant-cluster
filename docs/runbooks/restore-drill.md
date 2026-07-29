@@ -3,11 +3,11 @@
 **Trigger:** after a protected Qdrant snapshot backup succeeds, before declaring
 Qdrant recoverable, and before any ownership/import work.
 
-**Safety:** restores one selected snapshot from S3 into a disposable local
-Qdrant Docker container on the GitHub runner. It does not SSH to live Qdrant,
-restore to live Qdrant, change production collections, run Terraform, run
-Ansible, or run Docker Compose. The disposable container and local files are
-removed at the end of the job.
+**Safety:** restores the manifest's node snapshots from S3 into a disposable
+three-node Qdrant Docker cluster on the GitHub runner. It does not SSH to live
+Qdrant, restore to live Qdrant, change production collections, run Terraform,
+run Ansible, or run Docker Compose. The disposable containers, temporary Docker
+network, and local files are removed at the end of the job.
 
 ## Run the drill
 
@@ -25,8 +25,8 @@ removed at the end of the job.
    2026-07-29T10:27:49Z
    ```
 
-5. Keep `source_node` as `qdrant-node-1` unless testing a different manifest
-   node snapshot.
+5. Keep `source_node` as `qdrant-node-1`; it is kept only for workflow input
+   compatibility and is ignored by the distributed drill.
 6. Leave `collection` empty to select the first collection in the manifest, or
    set it to a specific collection name.
 7. Approve the protected `production` environment gate.
@@ -51,12 +51,14 @@ to live Qdrant nodes.
   s3://<bucket>/<prefix>/<backup_id>/manifest.json
   ```
 
-- Selects one manifest snapshot from `source_node` and `collection`.
-- Downloads the selected snapshot from S3 to the runner.
-- Starts disposable `qdrant/qdrant:v1.17.0`.
-- Recovers the snapshot from a local `file://` URI with `priority: snapshot`.
+- Selects the requested collection snapshot from every manifest node.
+- Downloads all selected node snapshots from S3 to the runner.
+- Starts a disposable three-node `qdrant/qdrant:v1.17.0` cluster on a temporary
+  Docker network.
+- Recovers each node snapshot through that node's
+  `/collections/<collection>/snapshots/upload?priority=snapshot` API.
 - Verifies:
-  - local Qdrant readiness is `ok`;
+  - the local Qdrant collection-list API returns `ok`;
   - restored collection status is `green` or `yellow`;
   - restored collection has `points_count > 0`;
   - a one-point scroll returns at least one point.
@@ -66,15 +68,13 @@ to live Qdrant nodes.
 The artifact contains:
 
 - `qdrant-backup-manifest.json` - source backup manifest.
-- `qdrant-restore-plan.json` - selected source node, collection, snapshot,
-  expected size, and S3 key.
+- `qdrant-restore-plan.json` - selected collection, all node snapshots,
+  expected sizes, and S3 keys.
 - `qdrant-restore-plan.md` - operator-readable plan summary.
+- `qdrant-restore-download.tsv` - sanitized S3 download plan.
+- `qdrant-restore-upload.tsv` - sanitized per-node restore upload plan.
+- `qdrant-restore-urls.tsv` - disposable node URL mapping on the runner.
+- `recover-<node>-response.json` - Qdrant response for each node restore.
+- `recover-<node>-status.txt` - HTTP status for each node restore.
 - `qdrant-restore-report.json` - sanitized verification result.
 - `qdrant-restore-result.md` - operator-readable verification summary.
-
-## Limitation
-
-This first drill proves the backup object is downloadable and restorable into a
-disposable Qdrant process. For a full multi-node disaster recovery exercise,
-add a later drill that creates a disposable three-node Qdrant cluster and
-restores every node snapshot from the same manifest.

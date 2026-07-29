@@ -53,46 +53,45 @@ def manifest_payload() -> dict:
 
 
 class QdrantRestoreDrillTest(unittest.TestCase):
-    def test_plan_selects_manifest_snapshot_without_live_access(self) -> None:
+    def test_plan_selects_all_manifest_snapshots_without_live_access(self) -> None:
         backup_id = "2026-07-29T10:27:49Z"
-        plan = RESTORE.select_snapshot(
+        plan = RESTORE.select_snapshot_set(
             manifest_payload(),
             backup_id,
-            "qdrant-node-1",
             "example_collection",
             Path("/tmp/snapshots"),
         )
         self.assertEqual(plan["backup_id"], backup_id)
         self.assertEqual(plan["bucket"], "qdrant-backups-example")
         self.assertEqual(plan["collection"], "example_collection")
+        self.assertEqual(plan["nodes"], ["qdrant-node-1", "qdrant-node-2", "qdrant-node-3"])
+        self.assertEqual(len(plan["snapshots"]), 3)
         self.assertEqual(
-            plan["s3_key"],
+            plan["snapshots"][0]["s3_key"],
             "production/2026-07-29T10:27:49Z/nodes/qdrant-node-1/"
             "collections/example_collection/example_collection-qdrant-node-1.snapshot",
         )
         self.assertEqual(
-            plan["qdrant_file_uri"],
-            "file:///qdrant/snapshots/example_collection/"
+            plan["snapshots"][0]["local_snapshot_path"],
+            "/tmp/snapshots/qdrant-node-1/"
             "example_collection-qdrant-node-1.snapshot",
         )
 
     def test_plan_rejects_bad_backup_id_and_missing_node(self) -> None:
         manifest = manifest_payload()
         with self.assertRaises(RESTORE.RestoreDrillError):
-            RESTORE.select_snapshot(
+            RESTORE.select_snapshot_set(
                 manifest,
                 "2026-07-29",
-                "qdrant-node-1",
                 None,
                 Path("/tmp/snapshots"),
             )
 
         manifest["nodes"] = manifest["nodes"][:2]
         with self.assertRaises(RESTORE.RestoreDrillError):
-            RESTORE.select_snapshot(
+            RESTORE.select_snapshot_set(
                 manifest,
                 "2026-07-29T10:27:49Z",
-                "qdrant-node-1",
                 None,
                 Path("/tmp/snapshots"),
             )
@@ -142,8 +141,11 @@ class QdrantRestoreDrillTest(unittest.TestCase):
 
             self.assertEqual(result, 0)
             plan = json.loads(output_json.read_text(encoding="utf-8"))
-            self.assertEqual(plan["source_node"], "qdrant-node-1")
-            self.assertIn("Qdrant restore drill plan", output_md.read_text(encoding="utf-8"))
+            self.assertEqual(len(plan["snapshots"]), 3)
+            self.assertIn(
+                "Qdrant distributed restore drill plan",
+                output_md.read_text(encoding="utf-8"),
+            )
 
     def test_workflow_is_manual_disposable_and_never_targets_live_qdrant(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -153,17 +155,24 @@ class QdrantRestoreDrillTest(unittest.TestCase):
             "environment: production",
             "qdrant/qdrant:v1.17.0",
             "docker run",
+            "docker network create",
             '${restore_url}/collections',
-            "snapshots/recover?wait=true",
-            '"priority": "snapshot"',
-            "recover-response.json",
-            "recover-status.txt",
+            "snapshots/upload?wait=true&priority=snapshot",
+            "QDRANT__CLUSTER__ENABLED=true",
+            "--bootstrap",
+            "--uri",
+            "qdrant-restore-download.tsv",
+            "qdrant-restore-upload.tsv",
+            "qdrant-restore-urls.tsv",
+            "recover-*-response.json",
+            "recover-*-status.txt",
+            "Restore verification did not pass",
             "snapshot recovery failed with HTTP",
             "curl exit",
             "if: always()",
             "if-no-files-found: warn",
             'chmod 0777 "$snapshot_dir"',
-            '--volume "${QDRANT_RESTORE_SNAPSHOT_DIR}:/qdrant/snapshots"',
+            '--volume "${QDRANT_RESTORE_SNAPSHOT_DIR}/${node}:/qdrant/snapshots"',
             "alpine:3.20",
             "/cleanup-target",
             "scripts/qdrant-restore-drill.py",
@@ -182,6 +191,10 @@ class QdrantRestoreDrillTest(unittest.TestCase):
             "docker compose",
             ':/qdrant/snapshots:ro',
             "${restore_url}/readiness",
+            "snapshots/recover?wait=true",
+            "recover-body.json",
+            "recover-response.json",
+            "recover-status.txt",
         ):
             self.assertNotIn(forbidden, workflow)
 
