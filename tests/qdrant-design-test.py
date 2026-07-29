@@ -67,6 +67,7 @@ def test_qdrant_design_keeps_first_phase_read_only() -> None:
         "Add a read-only Qdrant runtime audit",
         "qdrant-live-inventory-audit.md",
         "qdrant-runtime-audit.md",
+        "qdrant-snapshot-backup.md",
         "Do not change live servers",
         "The first Ansible PR must not",
         "restart live Qdrant containers",
