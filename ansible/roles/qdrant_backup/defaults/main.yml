@@ -8,6 +8,9 @@ qdrant_backup_env_file: "{{ qdrant_backup_env_dir }}/backup.env"
 qdrant_backup_ssh_key_file: "{{ qdrant_backup_env_dir }}/qdrant_ssh_key"
 qdrant_backup_ssh_config_file: "{{ qdrant_backup_env_dir }}/ssh_config"
 qdrant_backup_script_path: /usr/local/bin/qdrant-snapshot-backup.sh
+qdrant_backup_awscli_url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+qdrant_backup_awscli_archive: /tmp/qdrant-backup-awscliv2.zip
+qdrant_backup_awscli_extract_dir: /tmp/qdrant-backup-awscli
 qdrant_backup_on_calendar: "*-*-* 00,12:00:00"
 qdrant_backup_randomized_delay_sec: 900
 qdrant_backup_retention_keep: 2

@@ -29,6 +29,83 @@
     fail_msg: Qdrant backup timer variables or vault secrets are incomplete.
   no_log: true
 
+- name: Install Qdrant backup OS dependencies
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - coreutils
+      - openssh-client
+      - python3
+      - unzip
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: not ansible_check_mode
+
+- name: Check Qdrant backup AWS CLI availability
+  ansible.builtin.command: /usr/local/bin/aws --version
+  register: qdrant_backup_awscli_check
+  changed_when: false
+  failed_when: false
+
+- name: Preview Qdrant backup AWS CLI installation
+  ansible.builtin.debug:
+    msg: "Check mode: AWS CLI v2 would be installed for Qdrant S3 uploads."
+  when:
+    - ansible_check_mode
+    - qdrant_backup_awscli_check.rc != 0
+
+- name: Download Qdrant backup AWS CLI installer
+  ansible.builtin.get_url:
+    url: "{{ qdrant_backup_awscli_url }}"
+    dest: "{{ qdrant_backup_awscli_archive }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - not ansible_check_mode
+    - qdrant_backup_awscli_check.rc != 0
+
+- name: Reset Qdrant backup AWS CLI installer directory
+  ansible.builtin.file:
+    path: "{{ qdrant_backup_awscli_extract_dir }}"
+    state: absent
+  when:
+    - not ansible_check_mode
+    - qdrant_backup_awscli_check.rc != 0
+
+- name: Create Qdrant backup AWS CLI installer directory
+  ansible.builtin.file:
+    path: "{{ qdrant_backup_awscli_extract_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - not ansible_check_mode
+    - qdrant_backup_awscli_check.rc != 0
+
+- name: Unpack Qdrant backup AWS CLI installer
+  ansible.builtin.unarchive:
+    src: "{{ qdrant_backup_awscli_archive }}"
+    dest: "{{ qdrant_backup_awscli_extract_dir }}"
+    remote_src: true
+  when:
+    - not ansible_check_mode
+    - qdrant_backup_awscli_check.rc != 0
+
+- name: Install Qdrant backup AWS CLI
+  ansible.builtin.command:
+    cmd: >-
+      {{ qdrant_backup_awscli_extract_dir }}/aws/install
+      --bin-dir /usr/local/bin
+      --install-dir /usr/local/aws-cli
+      --update
+    creates: /usr/local/bin/aws
+  when:
+    - not ansible_check_mode
+    - qdrant_backup_awscli_check.rc != 0
+
 - name: Create Qdrant backup config directory
   ansible.builtin.file:
     path: "{{ qdrant_backup_env_dir }}"
