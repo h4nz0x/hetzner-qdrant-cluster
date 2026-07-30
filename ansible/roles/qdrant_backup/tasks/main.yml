@@ -130,6 +130,14 @@
     group: root
     mode: "0755"
 
+- name: Create node_exporter textfile collector directory for Qdrant backup metrics
+  ansible.builtin.file:
+    path: "{{ qdrant_backup_metrics_textfile_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Install Qdrant backup environment file
   ansible.builtin.template:
     src: backup.env.j2
@@ -166,6 +174,7 @@
   loop:
     - qdrant-backup-node.sh
     - qdrant-backup-manifest.py
+    - qdrant-backup-metrics.py
     - qdrant-s3-retention-plan.py
 
 - name: Install Qdrant systemd backup coordinator script
@@ -194,6 +203,24 @@
     mode: "0644"
   notify: Reload systemd
 
+- name: Install Qdrant backup metrics service
+  ansible.builtin.template:
+    src: qdrant-backup-metrics.service.j2
+    dest: /etc/systemd/system/qdrant-backup-metrics.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install Qdrant backup metrics timer
+  ansible.builtin.template:
+    src: qdrant-backup-metrics.timer.j2
+    dest: /etc/systemd/system/qdrant-backup-metrics.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
 - name: Flush systemd daemon reload before enabling timer
   ansible.builtin.meta: flush_handlers
 
@@ -209,4 +236,11 @@
     name: qdrant-backup.timer
     enabled: "{{ qdrant_backup_enabled | bool }}"
     state: "{{ qdrant_backup_enabled | bool | ternary('started', 'stopped') }}"
+  when: not ansible_check_mode
+
+- name: Enable and start Qdrant backup metrics timer
+  ansible.builtin.systemd:
+    name: qdrant-backup-metrics.timer
+    enabled: "{{ qdrant_backup_metrics_enabled | bool }}"
+    state: "{{ qdrant_backup_metrics_enabled | bool | ternary('started', 'stopped') }}"
   when: not ansible_check_mode

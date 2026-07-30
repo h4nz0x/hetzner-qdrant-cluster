@@ -17,3 +17,6 @@ qdrant_backup_retention_keep: 2
 qdrant_backup_s3_bucket: qdrant-backups-example
 qdrant_backup_s3_prefix: production
 qdrant_backup_aws_region: us-west-2
+qdrant_backup_metrics_enabled: true
+qdrant_backup_metrics_textfile_dir: /var/lib/node_exporter/textfile
+qdrant_backup_metrics_file: "{{ qdrant_backup_metrics_textfile_dir }}/qdrant_backup.prom"
