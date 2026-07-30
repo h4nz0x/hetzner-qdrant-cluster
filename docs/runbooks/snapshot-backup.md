@@ -37,6 +37,9 @@ The rollout writes the server-local files:
 - `/etc/qdrant-backup/qdrant_ssh_key`
 - `/etc/systemd/system/qdrant-backup.service`
 - `/etc/systemd/system/qdrant-backup.timer`
+- `/etc/systemd/system/qdrant-backup-metrics.service`
+- `/etc/systemd/system/qdrant-backup-metrics.timer`
+- `/var/lib/node_exporter/textfile/qdrant_backup.prom`
 
 The scheduled path keeps secrets on the coordinator host and does not depend on
 GitHub scheduled workflows or repository secrets.
@@ -96,6 +99,30 @@ The artifact contains:
   and S3 key metadata.
 - `qdrant-backup-summary.md` - operator-readable summary.
 - `delete-prefixes.txt` - S3 backup prefixes selected for retention deletion.
+
+## Monitoring
+
+The rollout also installs `qdrant-backup-metrics.timer` on `qdrant-node-1`.
+Every five minutes it reads:
+
+```text
+/var/lib/qdrant-backup/latest/qdrant-backup-manifest.json
+```
+
+and writes node_exporter textfile metrics to:
+
+```text
+/var/lib/node_exporter/textfile/qdrant_backup.prom
+```
+
+Central Prometheus scrapes these metrics through the existing `qdrant_node`
+target. The key recovery signals are:
+
+- `qdrant_backup_last_success_timestamp_seconds`
+- `qdrant_backup_last_success`
+- `qdrant_backup_snapshot_objects`
+- `qdrant_backup_nodes`
+- `qdrant_backup_total_bytes`
 
 ## Follow-up
 

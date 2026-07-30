@@ -1,0 +1,7 @@
+[Unit]
+Description=Export Qdrant backup metrics for node_exporter
+After=qdrant-backup.service node_exporter.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 {{ qdrant_backup_lib_dir }}/qdrant-backup-metrics.py --manifest {{ qdrant_backup_state_dir }}/latest/qdrant-backup-manifest.json --output {{ qdrant_backup_metrics_file }} --retention-keep {{ qdrant_backup_retention_keep }}
