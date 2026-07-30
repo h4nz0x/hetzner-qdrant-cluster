@@ -1,0 +1,220 @@
+name: Production Qdrant Latest Restore Preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type FIND_QDRANT_LATEST_RESTORE_BACKUP"
+        required: true
+        type: string
+      collection:
+        default: ""
+        description: "Optional collection name; empty selects the first common manifest collection"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mongodb-infra-workflows
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: 1. Validate latest Qdrant restore preflight request
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, mongodb-infra]
+    steps:
+      - name: Validate explicit confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          if [[ "$CONFIRMATION" != "FIND_QDRANT_LATEST_RESTORE_BACKUP" ]]; then
+            echo "::error::confirmation must be exactly FIND_QDRANT_LATEST_RESTORE_BACKUP"
+            exit 1
+          fi
+
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify runner prerequisites
+        run: |
+          set -euo pipefail
+          missing=0
+          for command in aws python3; do
+            if ! command -v "$command" >/dev/null 2>&1; then
+              echo "::error::$command is required on the self-hosted runner"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
+      - name: Validate latest restore preflight safeguards
+        run: |
+          set -euo pipefail
+          python3 tests/qdrant-latest-restore-preflight-test.py
+
+  preflight:
+    name: 2. Select latest complete Qdrant backup
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, mongodb-infra]
+    environment: production
+    timeout-minutes: 15
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.QDRANT_BACKUP_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.QDRANT_BACKUP_AWS_REGION }}
+      QDRANT_BACKUP_S3_BUCKET: ${{ secrets.QDRANT_BACKUP_S3_BUCKET }}
+      QDRANT_BACKUP_S3_PREFIX: ${{ secrets.QDRANT_BACKUP_S3_PREFIX }}
+      RESTORE_COLLECTION: ${{ inputs.collection }}
+    steps:
+      - name: Check out approved main revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate preflight secrets
+        run: |
+          set -euo pipefail
+          for name in \
+            AWS_ACCESS_KEY_ID \
+            AWS_SECRET_ACCESS_KEY \
+            AWS_DEFAULT_REGION \
+            QDRANT_BACKUP_S3_BUCKET \
+            QDRANT_BACKUP_S3_PREFIX; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::${name} is not configured"
+              exit 1
+            fi
+          done
+
+      - name: Prepare latest restore preflight workspace
+        run: |
+          set -euo pipefail
+          preflight_dir="${RUNNER_TEMP}/production-qdrant-latest-restore-preflight"
+          report_dir="${preflight_dir}/report"
+          manifest_dir="${preflight_dir}/manifests"
+          install -d -m 0700 "$report_dir" "$manifest_dir"
+          {
+            echo "QDRANT_LATEST_PREFLIGHT_DIR=${preflight_dir}"
+            echo "QDRANT_LATEST_PREFLIGHT_REPORT_DIR=${report_dir}"
+            echo "QDRANT_LATEST_PREFLIGHT_MANIFEST_DIR=${manifest_dir}"
+          } >> "$GITHUB_ENV"
+
+      - name: List Qdrant backup prefixes from S3
+        run: |
+          set -euo pipefail
+          prefix="${QDRANT_BACKUP_S3_PREFIX%/}/"
+          aws s3api list-objects-v2 \
+            --bucket "$QDRANT_BACKUP_S3_BUCKET" \
+            --prefix "$prefix" \
+            --delimiter "/" \
+            --output json \
+            > "${QDRANT_LATEST_PREFLIGHT_REPORT_DIR}/s3-prefixes.json"
+
+          python3 - \
+            "${QDRANT_LATEST_PREFLIGHT_REPORT_DIR}/s3-prefixes.json" \
+            "$prefix" \
+            > "${QDRANT_LATEST_PREFLIGHT_REPORT_DIR}/manifest-candidates.tsv" <<'PY'
+          import json
+          import re
+          import sys
+
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          root = sys.argv[2]
+          pattern = re.compile(
+              r"^" + re.escape(root) +
+              r"(?P<backup_id>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)/$"
+          )
+          candidates = []
+          for item in payload.get("CommonPrefixes", []) or []:
+              prefix = item.get("Prefix")
+              if not isinstance(prefix, str):
+                  continue
+              match = pattern.fullmatch(prefix)
+              if match:
+                  backup_id = match.group("backup_id")
+                  candidates.append((backup_id, f"{prefix}manifest.json"))
+          for backup_id, manifest_key in sorted(candidates, reverse=True):
+              print(f"{backup_id}\t{manifest_key}")
+          PY
+
+          if [[ ! -s "${QDRANT_LATEST_PREFLIGHT_REPORT_DIR}/manifest-candidates.tsv" ]]; then
+            echo "::error::No Qdrant backup prefixes found under s3://${QDRANT_BACKUP_S3_BUCKET}/${prefix}"
+            exit 1
+          fi
+
+      - name: Download candidate Qdrant backup manifests
+        run: |
+          set -euo pipefail
+          downloaded="${QDRANT_LATEST_PREFLIGHT_REPORT_DIR}/downloaded-manifests.txt"
+          missing="${QDRANT_LATEST_PREFLIGHT_REPORT_DIR}/missing-manifests.tsv"
+          : > "$downloaded"
+          : > "$missing"
+
+          while IFS=$'\t' read -r backup_id manifest_key; do
+            manifest_file="${QDRANT_LATEST_PREFLIGHT_MANIFEST_DIR}/${backup_id}.json"
+            if aws s3api get-object \
+              --bucket "$QDRANT_BACKUP_S3_BUCKET" \
+              --key "$manifest_key" \
+              "$manifest_file" \
+              >/dev/null; then
+              echo "$manifest_file" >> "$downloaded"
+            else
+              printf '%s\t%s\n' "$backup_id" "$manifest_key" >> "$missing"
+            fi
+          done < "${QDRANT_LATEST_PREFLIGHT_REPORT_DIR}/manifest-candidates.tsv"
+
+          if [[ ! -s "$downloaded" ]]; then
+            echo "::error::No Qdrant backup manifest could be downloaded"
+            exit 1
+          fi
+
+      - name: Select latest complete Qdrant backup manifest
+        run: |
+          set -euo pipefail
+          manifest_args=()
+          while IFS= read -r manifest_file; do
+            manifest_args+=(--manifest "$manifest_file")
+          done < "${QDRANT_LATEST_PREFLIGHT_REPORT_DIR}/downloaded-manifests.txt"
+
+          collection_args=()
+          if [[ -n "$RESTORE_COLLECTION" ]]; then
+            collection_args=(--collection "$RESTORE_COLLECTION")
+          fi
+
+          backup_id="$(
+            python3 scripts/qdrant-latest-restore-preflight.py \
+              "${manifest_args[@]}" \
+              "${collection_args[@]}" \
+              --output-json "${QDRANT_LATEST_PREFLIGHT_REPORT_DIR}/qdrant-latest-restore-preflight.json" \
+              --output-md "${QDRANT_LATEST_PREFLIGHT_REPORT_DIR}/qdrant-latest-restore-preflight.md"
+          )"
+          echo "Selected Qdrant restore backup: ${backup_id}"
+          cat "${QDRANT_LATEST_PREFLIGHT_REPORT_DIR}/qdrant-latest-restore-preflight.md" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized latest restore preflight evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-qdrant-latest-restore-preflight-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/production-qdrant-latest-restore-preflight/report/s3-prefixes.json
+            ${{ runner.temp }}/production-qdrant-latest-restore-preflight/report/manifest-candidates.tsv
+            ${{ runner.temp }}/production-qdrant-latest-restore-preflight/report/downloaded-manifests.txt
+            ${{ runner.temp }}/production-qdrant-latest-restore-preflight/report/missing-manifests.tsv
+            ${{ runner.temp }}/production-qdrant-latest-restore-preflight/report/qdrant-latest-restore-preflight.json
+            ${{ runner.temp }}/production-qdrant-latest-restore-preflight/report/qdrant-latest-restore-preflight.md
+          retention-days: 30
+
+      - name: Remove latest restore preflight material
+        if: always()
+        run: |
+          rm -rf "${QDRANT_LATEST_PREFLIGHT_DIR:-}"

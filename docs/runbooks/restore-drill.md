@@ -29,6 +29,32 @@ Verified evidence:
 - Disposable containers, Docker network, and local drill material were removed
   by the cleanup step.
 
+## Find the latest backup to drill
+
+Run the read-only **Production Qdrant Latest Restore Preflight** workflow before
+starting a restore drill if you do not already have an exact reviewed backup ID.
+
+1. Open **Production Qdrant Latest Restore Preflight** in GitHub Actions.
+2. Select branch `main`.
+3. Enter exact confirmation:
+
+   ```text
+   FIND_QDRANT_LATEST_RESTORE_BACKUP
+   ```
+
+4. Leave `collection` empty to select the first collection present on every
+   manifest node, or set a specific collection name.
+5. Approve the protected `production` environment gate.
+6. Read the workflow summary or download artifact
+   `production-qdrant-latest-restore-preflight-<run_id>`.
+7. Copy the reported `backup_id` and `collection` into the restore drill
+   workflow inputs.
+
+The preflight only lists S3 prefixes and downloads candidate `manifest.json`
+files. It does not download snapshot bodies, connect to live Qdrant, SSH to any
+server, start Docker containers, run Terraform, run Ansible, restore data, or
+delete S3 objects.
+
 ## Run the drill
 
 1. Open **Production Qdrant Restore Drill** in GitHub Actions.
@@ -62,6 +88,9 @@ Required protected environment secrets:
 
 The drill does not require `QDRANT_SSH_PRIVATE_KEY` because it must not connect
 to live Qdrant nodes.
+
+The latest-backup preflight uses the same S3 secrets and also does not require
+`QDRANT_SSH_PRIVATE_KEY`.
 
 ## What it does
 
