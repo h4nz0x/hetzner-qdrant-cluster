@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       backup_id:
-        description: "Backup ID to drill, for example 2026-07-29T10:27:49Z"
+        description: "Backup ID to drill, for example 2026-07-29T10:27:49Z, or latest"
         required: true
         type: string
       source_node:
@@ -115,9 +115,11 @@ jobs:
           import sys
 
           backup_id = sys.argv[1]
+          if backup_id == "latest":
+              raise SystemExit(0)
           backup_id_pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
           if not re.fullmatch(backup_id_pattern, backup_id):
-              raise SystemExit("backup_id must be an exact UTC timestamp")
+              raise SystemExit("backup_id must be latest or an exact UTC timestamp")
           PY
 
       - name: Prepare disposable restore drill workspace
@@ -125,9 +127,10 @@ jobs:
           set -euo pipefail
           drill_dir="${RUNNER_TEMP}/production-qdrant-restore-drill"
           report_dir="${drill_dir}/report"
+          manifest_dir="${drill_dir}/manifests"
           snapshot_dir="${drill_dir}/snapshots"
           storage_dir="${drill_dir}/storage"
-          install -d -m 0700 "$report_dir" "$snapshot_dir" "$storage_dir"
+          install -d -m 0700 "$report_dir" "$manifest_dir" "$snapshot_dir" "$storage_dir"
           chmod 0755 "$drill_dir"
           chmod 0777 "$snapshot_dir"
           chmod 0777 "$storage_dir"
@@ -137,9 +140,114 @@ jobs:
           {
             echo "QDRANT_RESTORE_DRILL_DIR=${drill_dir}"
             echo "QDRANT_RESTORE_REPORT_DIR=${report_dir}"
+            echo "QDRANT_RESTORE_MANIFEST_DIR=${manifest_dir}"
             echo "QDRANT_RESTORE_SNAPSHOT_DIR=${snapshot_dir}"
             echo "QDRANT_RESTORE_STORAGE_DIR=${storage_dir}"
           } >> "$GITHUB_ENV"
+
+      - name: Resolve latest Qdrant restore backup from S3
+        if: inputs.backup_id == 'latest'
+        run: |
+          set -euo pipefail
+          prefix="${QDRANT_BACKUP_S3_PREFIX%/}/"
+          aws s3api list-objects-v2 \
+            --bucket "$QDRANT_BACKUP_S3_BUCKET" \
+            --prefix "$prefix" \
+            --delimiter "/" \
+            --output json \
+            > "${QDRANT_RESTORE_REPORT_DIR}/s3-prefixes.json"
+
+          python3 - \
+            "${QDRANT_RESTORE_REPORT_DIR}/s3-prefixes.json" \
+            "$prefix" \
+            > "${QDRANT_RESTORE_REPORT_DIR}/manifest-candidates.tsv" <<'PY'
+          import json
+          import re
+          import sys
+
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          root = sys.argv[2]
+          pattern = re.compile(
+              r"^" + re.escape(root) +
+              r"(?P<backup_id>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)/$"
+          )
+          candidates = []
+          for item in payload.get("CommonPrefixes", []) or []:
+              prefix = item.get("Prefix")
+              if not isinstance(prefix, str):
+                  continue
+              match = pattern.fullmatch(prefix)
+              if match:
+                  backup_id = match.group("backup_id")
+                  candidates.append((backup_id, f"{prefix}manifest.json"))
+          for backup_id, manifest_key in sorted(candidates, reverse=True):
+              print(f"{backup_id}\t{manifest_key}")
+          PY
+
+          if [[ ! -s "${QDRANT_RESTORE_REPORT_DIR}/manifest-candidates.tsv" ]]; then
+            echo "::error::No Qdrant backup prefixes found under s3://${QDRANT_BACKUP_S3_BUCKET}/${prefix}"
+            exit 1
+          fi
+
+          downloaded="${QDRANT_RESTORE_REPORT_DIR}/downloaded-manifests.txt"
+          missing="${QDRANT_RESTORE_REPORT_DIR}/missing-manifests.tsv"
+          : > "$downloaded"
+          : > "$missing"
+
+          while IFS=$'\t' read -r backup_id manifest_key; do
+            manifest_file="${QDRANT_RESTORE_MANIFEST_DIR}/${backup_id}.json"
+            if aws s3api get-object \
+              --bucket "$QDRANT_BACKUP_S3_BUCKET" \
+              --key "$manifest_key" \
+              "$manifest_file" \
+              >/dev/null; then
+              echo "$manifest_file" >> "$downloaded"
+            else
+              printf '%s\t%s\n' "$backup_id" "$manifest_key" >> "$missing"
+            fi
+          done < "${QDRANT_RESTORE_REPORT_DIR}/manifest-candidates.tsv"
+
+          if [[ ! -s "$downloaded" ]]; then
+            echo "::error::No Qdrant backup manifest could be downloaded"
+            exit 1
+          fi
+
+          manifest_args=()
+          while IFS= read -r manifest_file; do
+            manifest_args+=(--manifest "$manifest_file")
+          done < "$downloaded"
+
+          collection_args=()
+          if [[ -n "$RESTORE_COLLECTION" ]]; then
+            collection_args=(--collection "$RESTORE_COLLECTION")
+          fi
+
+          resolved_backup_id="$(
+            python3 scripts/qdrant-latest-restore-preflight.py \
+              "${manifest_args[@]}" \
+              "${collection_args[@]}" \
+              --output-json "${QDRANT_RESTORE_REPORT_DIR}/qdrant-latest-restore-preflight.json" \
+              --output-md "${QDRANT_RESTORE_REPORT_DIR}/qdrant-latest-restore-preflight.md"
+          )"
+          resolved_collection="$(
+            python3 - "${QDRANT_RESTORE_REPORT_DIR}/qdrant-latest-restore-preflight.json" <<'PY'
+          import json
+          import sys
+
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          print(payload["selection"]["selected_collection"])
+          PY
+          )"
+
+          {
+            echo "RESTORE_BACKUP_ID=${resolved_backup_id}"
+            echo "RESTORE_COLLECTION=${resolved_collection}"
+          } >> "$GITHUB_ENV"
+
+          echo "Resolved Qdrant restore backup: ${resolved_backup_id}"
+          echo "Resolved Qdrant restore collection: ${resolved_collection}"
+          cat "${QDRANT_RESTORE_REPORT_DIR}/qdrant-latest-restore-preflight.md" \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - name: Download Qdrant backup manifest from S3
         run: |
@@ -388,6 +496,12 @@ jobs:
           name: production-qdrant-restore-drill-${{ github.run_id }}
           if-no-files-found: warn
           path: |
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/s3-prefixes.json
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/manifest-candidates.tsv
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/downloaded-manifests.txt
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/missing-manifests.tsv
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-latest-restore-preflight.json
+            ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-latest-restore-preflight.md
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-backup-manifest.json
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-plan.json
             ${{ runner.temp }}/production-qdrant-restore-drill/report/qdrant-restore-plan.md
