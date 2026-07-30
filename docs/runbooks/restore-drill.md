@@ -31,8 +31,8 @@ Verified evidence:
 
 ## Find the latest backup to drill
 
-Run the read-only **Production Qdrant Latest Restore Preflight** workflow before
-starting a restore drill if you do not already have an exact reviewed backup ID.
+Run the read-only **Production Qdrant Latest Restore Preflight** workflow when
+you want to review the latest complete backup before starting a restore drill.
 
 1. Open **Production Qdrant Latest Restore Preflight** in GitHub Actions.
 2. Select branch `main`.
@@ -47,8 +47,9 @@ starting a restore drill if you do not already have an exact reviewed backup ID.
 5. Approve the protected `production` environment gate.
 6. Read the workflow summary or download artifact
    `production-qdrant-latest-restore-preflight-<run_id>`.
-7. Copy the reported `backup_id` and `collection` into the restore drill
-   workflow inputs.
+7. Use the reported `backup_id` and `collection` as restore drill inputs, or
+   use `backup_id=latest` in the restore drill to resolve the same selection
+   automatically.
 
 The preflight only lists S3 prefixes and downloads candidate `manifest.json`
 files. It does not download snapshot bodies, connect to live Qdrant, SSH to any
@@ -65,11 +66,22 @@ delete S3 objects.
    RUN_QDRANT_RESTORE_DRILL
    ```
 
-4. Enter the backup ID, for example:
+4. Enter an exact backup ID, for example:
 
    ```text
    2026-07-29T10:27:49Z
    ```
+
+   You can also enter:
+
+   ```text
+   latest
+   ```
+
+   When `backup_id=latest`, the restore drill first runs the same read-only S3
+   manifest preflight internally, writes the resolved exact `backup_id` and
+   `collection` into the job environment, and then continues with the normal
+   disposable restore path.
 
 5. Keep `source_node` as `qdrant-node-1`; it is kept only for workflow input
    compatibility and is ignored by the distributed drill.
@@ -100,6 +112,10 @@ The latest-backup preflight uses the same S3 secrets and also does not require
   s3://<bucket>/<prefix>/<backup_id>/manifest.json
   ```
 
+  If the input backup ID is `latest`, the workflow first resolves `latest` to an
+  exact timestamped backup ID by listing S3 backup prefixes and validating
+  candidate manifests.
+
 - Selects the requested collection snapshot from every manifest node.
 - Downloads all selected node snapshots from S3 to the runner.
 - Starts a disposable three-node `qdrant/qdrant:v1.17.0` cluster on a temporary
@@ -116,6 +132,18 @@ The latest-backup preflight uses the same S3 secrets and also does not require
 
 The artifact contains:
 
+- `s3-prefixes.json` - S3 backup prefix listing, present when
+  `backup_id=latest`.
+- `manifest-candidates.tsv` - candidate backup IDs and manifest keys, present
+  when `backup_id=latest`.
+- `downloaded-manifests.txt` - local candidate manifest files, present when
+  `backup_id=latest`.
+- `missing-manifests.tsv` - candidate manifest keys that could not be
+  downloaded, present when `backup_id=latest`.
+- `qdrant-latest-restore-preflight.json` - resolved latest backup selection,
+  present when `backup_id=latest`.
+- `qdrant-latest-restore-preflight.md` - operator-readable latest backup
+  selection summary, present when `backup_id=latest`.
 - `qdrant-backup-manifest.json` - source backup manifest.
 - `qdrant-restore-plan.json` - selected collection, all node snapshots,
   expected sizes, and S3 keys.
