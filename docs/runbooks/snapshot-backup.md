@@ -124,6 +124,16 @@ target. The key recovery signals are:
 - `qdrant_backup_nodes`
 - `qdrant_backup_total_bytes`
 
+On the current live Qdrant hosts, `node_exporter` runs as a standalone Docker
+container. The rollout makes that container read the host textfile directory
+through:
+
+```text
+--collector.textfile.directory=/host/var/lib/node_exporter/textfile
+```
+
+This restart affects only the monitoring exporter container, not Qdrant.
+
 ## Follow-up
 
 After any backup implementation change, run the disposable restore drill against

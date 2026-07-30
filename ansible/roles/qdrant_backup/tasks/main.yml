@@ -138,6 +138,50 @@
     group: root
     mode: "0755"
 
+- name: Inspect standalone Docker node_exporter for Qdrant backup textfile support
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - node_exporter
+      - --format
+      - "{% raw %}{{ .Config.Image }} {{ json .Config.Cmd }}{% endraw %}"
+  register: qdrant_backup_node_exporter_inspect
+  changed_when: false
+  failed_when: false
+
+- name: Preview Docker node_exporter textfile collector update
+  ansible.builtin.debug:
+    msg: >-
+      Check mode: standalone Docker node_exporter would be recreated with
+      --collector.textfile.directory=/host{{ qdrant_backup_metrics_textfile_dir }}.
+  when:
+    - ansible_check_mode
+    - qdrant_backup_node_exporter_inspect.rc == 0
+    - "'--collector.textfile.directory=/host' ~ qdrant_backup_metrics_textfile_dir not in qdrant_backup_node_exporter_inspect.stdout"
+
+- name: Recreate standalone Docker node_exporter with Qdrant backup textfile collector
+  ansible.builtin.shell: |
+    set -euo pipefail
+    image="$(docker inspect node_exporter --format '{% raw %}{{ .Config.Image }}{% endraw %}')"
+    docker stop node_exporter
+    docker rm node_exporter
+    docker run -d \
+      --name node_exporter \
+      --restart unless-stopped \
+      --network host \
+      -v /:/host:ro,rslave \
+      "${image}" \
+      --path.rootfs=/host \
+      --collector.textfile.directory=/host{{ qdrant_backup_metrics_textfile_dir }}
+  args:
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - qdrant_backup_node_exporter_inspect.rc == 0
+    - "'--collector.textfile.directory=/host' ~ qdrant_backup_metrics_textfile_dir not in qdrant_backup_node_exporter_inspect.stdout"
+
 - name: Install Qdrant backup environment file
   ansible.builtin.template:
     src: backup.env.j2
