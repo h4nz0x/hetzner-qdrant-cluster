@@ -223,6 +223,9 @@ Required alerts before declaring Qdrant managed:
    - Upload to object storage.
    - Retain only two completed backup sets after successful upload.
    - Add stale-backup alerting.
+   - Automatic scheduling belongs to the Ansible-managed `qdrant-backup.timer`
+     on the coordinator host; GitHub Actions remains for protected manual
+     backups and restore drills.
    - Workflow/runbook:
      [qdrant-snapshot-backup.md](runbooks/qdrant-snapshot-backup.md).
 

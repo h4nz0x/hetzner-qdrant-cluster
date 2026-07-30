@@ -1,0 +1,127 @@
+---
+- name: Validate explicit Qdrant backup timer rollout confirmation
+  ansible.builtin.assert:
+    that:
+      - qdrant_backup_timer_confirmation | default('') == 'APPLY_QDRANT_BACKUP_TIMER'
+    fail_msg: >-
+      Refusing to install Qdrant backup timer without
+      qdrant_backup_timer_confirmation=APPLY_QDRANT_BACKUP_TIMER.
+
+- name: Require exactly one Qdrant backup coordinator
+  ansible.builtin.assert:
+    that:
+      - groups[qdrant_backup_coordinator_group] | default([]) | length == 1
+      - inventory_hostname in groups[qdrant_backup_coordinator_group]
+    fail_msg: >-
+      Qdrant backups must be installed on exactly one coordinator host.
+
+- name: Validate Qdrant backup configuration
+  ansible.builtin.assert:
+    that:
+      - qdrant_backup_on_calendar == "*-*-* 00,12:00:00"
+      - qdrant_backup_retention_keep | int == 2
+      - qdrant_backup_s3_bucket | length > 0
+      - qdrant_backup_s3_prefix | length > 0
+      - qdrant_backup_aws_region | length > 0
+      - vault_qdrant_backup_aws_access_key_id | length > 0
+      - vault_qdrant_backup_aws_secret_access_key | length > 0
+      - vault_qdrant_backup_ssh_private_key | length > 0
+    fail_msg: Qdrant backup timer variables or vault secrets are incomplete.
+  no_log: true
+
+- name: Create Qdrant backup config directory
+  ansible.builtin.file:
+    path: "{{ qdrant_backup_env_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Create Qdrant backup state directory
+  ansible.builtin.file:
+    path: "{{ qdrant_backup_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Create Qdrant backup helper directory
+  ansible.builtin.file:
+    path: "{{ qdrant_backup_lib_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install Qdrant backup environment file
+  ansible.builtin.template:
+    src: backup.env.j2
+    dest: "{{ qdrant_backup_env_file }}"
+    owner: root
+    group: root
+    mode: "0400"
+  no_log: true
+
+- name: Install Qdrant backup SSH private key
+  ansible.builtin.copy:
+    dest: "{{ qdrant_backup_ssh_key_file }}"
+    content: "{{ vault_qdrant_backup_ssh_private_key }}\n"
+    owner: root
+    group: root
+    mode: "0400"
+  no_log: true
+
+- name: Install Qdrant backup SSH config
+  ansible.builtin.template:
+    src: ssh_config.j2
+    dest: "{{ qdrant_backup_ssh_config_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Install Qdrant backup helper scripts
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/{{ item }}"
+    dest: "{{ qdrant_backup_lib_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - qdrant-backup-node.sh
+    - qdrant-backup-manifest.py
+    - qdrant-s3-retention-plan.py
+
+- name: Install Qdrant systemd backup coordinator script
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/qdrant-systemd-snapshot-backup.sh"
+    dest: "{{ qdrant_backup_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install Qdrant backup service
+  ansible.builtin.template:
+    src: qdrant-backup.service.j2
+    dest: /etc/systemd/system/qdrant-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install Qdrant backup timer
+  ansible.builtin.template:
+    src: qdrant-backup.timer.j2
+    dest: /etc/systemd/system/qdrant-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Flush systemd daemon reload before enabling timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start Qdrant backup timer
+  ansible.builtin.systemd:
+    name: qdrant-backup.timer
+    enabled: "{{ qdrant_backup_enabled | bool }}"
+    state: "{{ qdrant_backup_enabled | bool | ternary('started', 'stopped') }}"

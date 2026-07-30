@@ -1,0 +1,12 @@
+[Unit]
+Description=Create and upload Qdrant snapshot backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile={{ qdrant_backup_env_file }}
+ExecStart={{ qdrant_backup_script_path }}
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

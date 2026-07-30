@@ -1,0 +1,9 @@
+---
+- name: Install Qdrant snapshot backup systemd timer
+  hosts: qdrant_backup_coordinator
+  become: true
+  gather_facts: false
+  serial: 1
+  tags: [qdrant, backup]
+  roles:
+    - qdrant_backup

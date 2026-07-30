@@ -1,0 +1,16 @@
+---
+qdrant_backup_enabled: true
+qdrant_backup_coordinator_group: qdrant_backup_coordinator
+qdrant_backup_env_dir: /etc/qdrant-backup
+qdrant_backup_state_dir: /var/lib/qdrant-backup
+qdrant_backup_lib_dir: /usr/local/lib/qdrant-backup
+qdrant_backup_env_file: "{{ qdrant_backup_env_dir }}/backup.env"
+qdrant_backup_ssh_key_file: "{{ qdrant_backup_env_dir }}/qdrant_ssh_key"
+qdrant_backup_ssh_config_file: "{{ qdrant_backup_env_dir }}/ssh_config"
+qdrant_backup_script_path: /usr/local/bin/qdrant-snapshot-backup.sh
+qdrant_backup_on_calendar: "*-*-* 00,12:00:00"
+qdrant_backup_randomized_delay_sec: 900
+qdrant_backup_retention_keep: 2
+qdrant_backup_s3_bucket: qdrant-backups-example
+qdrant_backup_s3_prefix: production
+qdrant_backup_aws_region: us-west-2
