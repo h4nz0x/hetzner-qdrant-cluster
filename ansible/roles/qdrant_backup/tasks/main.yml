@@ -120,8 +120,16 @@
 - name: Flush systemd daemon reload before enabling timer
   ansible.builtin.meta: flush_handlers
 
+- name: Preview Qdrant backup timer enablement
+  ansible.builtin.debug:
+    msg: >-
+      Check mode: qdrant-backup.timer would be
+      {{ qdrant_backup_enabled | bool | ternary('enabled and started', 'disabled and stopped') }}.
+  when: ansible_check_mode
+
 - name: Enable and start Qdrant backup timer
   ansible.builtin.systemd:
     name: qdrant-backup.timer
     enabled: "{{ qdrant_backup_enabled | bool }}"
     state: "{{ qdrant_backup_enabled | bool | ternary('started', 'stopped') }}"
+  when: not ansible_check_mode

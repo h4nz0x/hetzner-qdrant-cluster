@@ -51,6 +51,9 @@ class QdrantBackupTimerTest(unittest.TestCase):
             "qdrant-backup-node.sh",
             "qdrant-backup-manifest.py",
             "qdrant-s3-retention-plan.py",
+            "Preview Qdrant backup timer enablement",
+            "when: ansible_check_mode",
+            "when: not ansible_check_mode",
             "enabled:",
             "state:",
         ):
