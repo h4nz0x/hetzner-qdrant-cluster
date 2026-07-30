@@ -145,8 +145,11 @@ owns monitoring.
 
 ## Backup and restore contract
 
-Qdrant must not be treated as production-recoverable until there is a successful
-restore drill.
+Qdrant has runtime proof for the current S3 snapshot recovery path: protected
+workflow run `30586889983` restored backup `2026-07-30T15:51:46Z` into a
+disposable three-node Qdrant cluster and verified collection `example_collection`
+with `4226643` restored points. Repeat this drill after any backup, restore,
+image, or topology change before treating the changed path as recoverable.
 
 Preferred backup model:
 
