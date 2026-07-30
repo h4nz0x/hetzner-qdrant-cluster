@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Qdrant snapshot backup twice daily
+
+[Timer]
+OnCalendar={{ qdrant_backup_on_calendar }}
+RandomizedDelaySec={{ qdrant_backup_randomized_delay_sec }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

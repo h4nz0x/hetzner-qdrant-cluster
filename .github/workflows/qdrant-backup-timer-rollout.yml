@@ -1,0 +1,227 @@
+name: Production Qdrant Backup Timer Rollout
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type APPLY_QDRANT_BACKUP_TIMER"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mongodb-infra-workflows
+  cancel-in-progress: false
+
+env:
+  ANSIBLE_NOCOLOR: "1"
+  ANSIBLE_COLLECTIONS_PATH: ${{ github.workspace }}/ansible/collections
+
+jobs:
+  rollout:
+    name: Install Qdrant systemd backup timer
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, mongodb-infra]
+    environment: production
+    timeout-minutes: 30
+    steps:
+      - name: Validate explicit confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          if [[ "$CONFIRMATION" != "APPLY_QDRANT_BACKUP_TIMER" ]]; then
+            echo "::error::confirmation must be exactly APPLY_QDRANT_BACKUP_TIMER"
+            exit 1
+          fi
+
+      - name: Check out approved main revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible runtime
+        run: |
+          rm -rf "${RUNNER_TEMP}/qdrant-backup-timer-venv"
+          python -m venv "${RUNNER_TEMP}/qdrant-backup-timer-venv"
+          echo "${RUNNER_TEMP}/qdrant-backup-timer-venv/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/qdrant-backup-timer-venv/bin/pip" install \
+            "ansible-core>=2.16,<2.20"
+
+      - name: Install Ansible collections
+        run: |
+          rm -rf ansible/collections
+          ansible-galaxy collection install \
+            -r ansible/requirements.yml \
+            -p ansible/collections
+
+      - name: Validate Qdrant backup timer safeguards
+        run: |
+          set -euo pipefail
+          python3 tests/qdrant-design-test.py
+          python3 tests/qdrant-backup-test.py
+          python3 tests/qdrant-backup-timer-test.py
+          shellcheck --severity=warning scripts/qdrant-systemd-snapshot-backup.sh
+
+      - name: Prepare temporary Qdrant backup vault
+        env:
+          QDRANT_BACKUP_AWS_ACCESS_KEY_ID: ${{ secrets.QDRANT_BACKUP_AWS_ACCESS_KEY_ID }}
+          QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY: ${{ secrets.QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY }}
+          QDRANT_SSH_PRIVATE_KEY: ${{ secrets.QDRANT_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          for name in \
+            QDRANT_BACKUP_AWS_ACCESS_KEY_ID \
+            QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY \
+            QDRANT_SSH_PRIVATE_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::${name} is not configured"
+              exit 1
+            fi
+          done
+
+          install -d -m 0700 ansible/inventories/qdrant-production/group_vars/all
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          output = Path("ansible/inventories/qdrant-production/group_vars/all/vault.yml")
+          values = {
+              "vault_qdrant_backup_aws_access_key_id": os.environ[
+                  "QDRANT_BACKUP_AWS_ACCESS_KEY_ID"
+              ],
+              "vault_qdrant_backup_aws_secret_access_key": os.environ[
+                  "QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY"
+              ],
+              "vault_qdrant_backup_ssh_private_key": os.environ["QDRANT_SSH_PRIVATE_KEY"],
+          }
+          lines = ["---"]
+          for key, value in values.items():
+              lines.append(f"{key}: {json.dumps(value)}")
+          output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          output.chmod(0o600)
+          PY
+
+      - name: Prepare isolated SSH configuration
+        env:
+          QDRANT_SSH_PRIVATE_KEY: ${{ secrets.QDRANT_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$QDRANT_SSH_PRIVATE_KEY" || {
+            echo "::error::QDRANT_SSH_PRIVATE_KEY is not configured"
+            exit 1
+          }
+
+          ssh_dir="${RUNNER_TEMP}/qdrant-backup-timer-ssh"
+          key_file="${ssh_dir}/qdrant_backup_timer"
+          known_hosts_file="${ssh_dir}/known_hosts"
+          config_file="${ssh_dir}/config"
+          install -d -m 0700 "$ssh_dir"
+          printf '%s\n' "$QDRANT_SSH_PRIVATE_KEY" > "$key_file"
+          chmod 0600 "$key_file"
+          install -m 0600 /dev/null "$known_hosts_file"
+
+          cat > "$config_file" <<EOF
+          Host *
+            User root
+            IdentityFile ${key_file}
+            IdentitiesOnly yes
+            UserKnownHostsFile ${known_hosts_file}
+            StrictHostKeyChecking yes
+            ControlMaster no
+            ControlPath none
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
+          EOF
+          chmod 0600 "$config_file"
+
+          ssh-keyscan -T 10 -t ed25519 \
+            203.0.113.11 203.0.113.12 203.0.113.13 \
+            2>/dev/null >> "$known_hosts_file"
+          for host in 203.0.113.11 203.0.113.12 203.0.113.13; do
+            ssh-keygen -F "$host" -f "$known_hosts_file" >/dev/null || {
+              echo "::error::Could not obtain SSH host key for ${host}"
+              exit 1
+            }
+          done
+
+          echo "ANSIBLE_SSH_ARGS=-F ${config_file}" >> "$GITHUB_ENV"
+
+      - name: Preview Qdrant backup timer install
+        working-directory: ansible
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP}/qdrant-backup-timer-preview.log"
+
+          ansible-playbook \
+            -i inventories/qdrant-production \
+            playbooks/qdrant-backup-timer.yml \
+            --limit qdrant_backup_coordinator \
+            --check \
+            --diff \
+            -e qdrant_backup_timer_confirmation=APPLY_QDRANT_BACKUP_TIMER \
+            | tee "$log_file"
+
+      - name: Install Qdrant backup timer
+        working-directory: ansible
+        run: |
+          set -euo pipefail
+          log_file="${RUNNER_TEMP}/qdrant-backup-timer-rollout.log"
+
+          ansible-playbook \
+            -i inventories/qdrant-production \
+            playbooks/qdrant-backup-timer.yml \
+            --limit qdrant_backup_coordinator \
+            --diff \
+            -e qdrant_backup_timer_confirmation=APPLY_QDRANT_BACKUP_TIMER \
+            | tee "$log_file"
+
+      - name: Publish sanitized rollout evidence
+        if: always() && !cancelled()
+        run: |
+          {
+            cat <<'SUMMARY'
+          ### Production Qdrant backup timer rollout
+
+          - Scheduler: `systemd timer on qdrant-node-1`
+          - Schedule: `00:00/12:00 UTC`
+          - Retention: `2 completed backup sets`
+          - GitHub scheduled backup: disabled
+
+          SUMMARY
+            for log_file in \
+              "${RUNNER_TEMP}/qdrant-backup-timer-preview.log" \
+              "${RUNNER_TEMP}/qdrant-backup-timer-rollout.log"; do
+              if [[ -f "$log_file" ]]; then
+                echo '```text'
+                cat "$log_file"
+                echo '```'
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized rollout evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-qdrant-backup-timer-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/qdrant-backup-timer-preview.log
+            ${{ runner.temp }}/qdrant-backup-timer-rollout.log
+          retention-days: 30
+
+      - name: Remove temporary Qdrant backup material
+        if: always()
+        run: |
+          rm -rf \
+            "${RUNNER_TEMP}/qdrant-backup-timer-ssh" \
+            ansible/inventories/qdrant-production/group_vars/all/vault.yml

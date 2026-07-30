@@ -133,15 +133,12 @@ class QdrantBackupTest(unittest.TestCase):
         for forbidden in ("DELETE", "snapshots/delete", "rm -rf", "docker"):
             self.assertNotIn(forbidden, script)
 
-    def test_workflow_runs_manual_and_scheduled_backups_with_two_set_retention(self) -> None:
+    def test_workflow_runs_protected_manual_backup_only(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         for required in (
-            'cron: "0 */12 * * *"',
             "workflow_dispatch:",
             "CREATE_QDRANT_S3_SNAPSHOT_BACKUP",
-            "EVENT_NAME: ${{ github.event_name }}",
-            "backup-manual:",
-            "backup-scheduled:",
+            "environment: production",
             "QDRANT_SSH_PRIVATE_KEY: ${{ secrets.QDRANT_SSH_PRIVATE_KEY }}",
             "QDRANT_BACKUP_AWS_ACCESS_KEY_ID",
             "QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY",
@@ -152,15 +149,12 @@ class QdrantBackupTest(unittest.TestCase):
             "scripts/qdrant-snapshot-backup.sh",
             "shellcheck --severity=warning scripts/qdrant-snapshot-backup.sh",
             "bash scripts/qdrant-snapshot-backup.sh",
-            "github.event_name == 'workflow_dispatch'",
-            "github.event_name == 'schedule'",
         ):
             self.assertIn(required, workflow)
 
-        manual_job = workflow.split("  backup-manual:", 1)[1].split("  backup-scheduled:", 1)[0]
-        scheduled_job = workflow.split("  backup-scheduled:", 1)[1]
-        self.assertIn("environment: production", manual_job)
-        self.assertNotIn("environment:", scheduled_job)
+        self.assertNotIn("schedule:", workflow)
+        self.assertNotIn("backup-scheduled:", workflow)
+        self.assertNotIn("github.event_name == 'schedule'", workflow)
 
         script = (ROOT / "scripts" / "qdrant-snapshot-backup.sh").read_text(encoding="utf-8")
         for required in (
@@ -177,9 +171,8 @@ class QdrantBackupTest(unittest.TestCase):
 
         runbook = RUNBOOK.read_text(encoding="utf-8")
         for required in (
-            "automatic production backup every 12 hours",
-            "0 */12 * * *",
-            "repository secrets for the scheduled path",
+            "manual backup",
+            "systemd timer",
             "latest two completed backup sets",
         ):
             self.assertIn(required, runbook)

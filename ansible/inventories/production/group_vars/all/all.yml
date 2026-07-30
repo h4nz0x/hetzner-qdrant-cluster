@@ -1,0 +1,7 @@
+---
+qdrant_backup_s3_bucket: qdrant-backups-example
+qdrant_backup_s3_prefix: production
+qdrant_backup_aws_region: us-west-2
+qdrant_backup_on_calendar: "*-*-* 00,12:00:00"
+qdrant_backup_randomized_delay_sec: 900
+qdrant_backup_retention_keep: 2

@@ -1,8 +1,6 @@
 name: Production Qdrant Snapshot Backup
 
 on:
-  schedule:
-    - cron: "0 */12 * * *"
   workflow_dispatch:
     inputs:
       confirmation:
@@ -26,23 +24,12 @@ jobs:
       - name: Validate trigger
         env:
           CONFIRMATION: ${{ inputs.confirmation }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          case "$EVENT_NAME" in
-            schedule)
-              ;;
-            workflow_dispatch)
-              if [[ "$CONFIRMATION" != "CREATE_QDRANT_S3_SNAPSHOT_BACKUP" ]]; then
-                echo "::error::confirmation must be exactly CREATE_QDRANT_S3_SNAPSHOT_BACKUP"
-                exit 1
-              fi
-              ;;
-            *)
-              echo "::error::unsupported trigger ${EVENT_NAME}"
-              exit 1
-              ;;
-          esac
+          if [[ "$CONFIRMATION" != "CREATE_QDRANT_S3_SNAPSHOT_BACKUP" ]]; then
+            echo "::error::confirmation must be exactly CREATE_QDRANT_S3_SNAPSHOT_BACKUP"
+            exit 1
+          fi
 
       - name: Check out main
         uses: actions/checkout@v4
@@ -71,10 +58,10 @@ jobs:
           shellcheck --severity=warning scripts/qdrant-backup-node.sh
           shellcheck --severity=warning scripts/qdrant-snapshot-backup.sh
 
-  backup-manual:
-    name: 2a. Create protected manual Qdrant snapshots
+  backup:
+    name: 2. Create protected manual Qdrant snapshots
     needs: validate
-    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, linux, x64, mongodb-infra]
     environment: production
     timeout-minutes: 90
@@ -87,48 +74,6 @@ jobs:
       QDRANT_SSH_PRIVATE_KEY: ${{ secrets.QDRANT_SSH_PRIVATE_KEY }}
     steps:
       - name: Check out approved main revision
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Create, upload, and retain Qdrant snapshots
-        run: bash scripts/qdrant-snapshot-backup.sh
-
-      - name: Upload sanitized Qdrant backup evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: production-qdrant-backup-${{ github.run_id }}
-          if-no-files-found: warn
-          path: |
-            ${{ runner.temp }}/production-qdrant-backup-report/qdrant-backup-manifest.json
-            ${{ runner.temp }}/production-qdrant-backup-report/qdrant-backup-summary.md
-            ${{ runner.temp }}/production-qdrant-backup-report/delete-prefixes.txt
-          retention-days: 30
-
-      - name: Remove temporary Qdrant backup material
-        if: always()
-        run: |
-          rm -rf \
-            "${RUNNER_TEMP}/production-qdrant-backup-ssh" \
-            "${RUNNER_TEMP}/production-qdrant-backup-raw" \
-            "${RUNNER_TEMP}/production-qdrant-backup-report"
-
-  backup-scheduled:
-    name: 2b. Create scheduled Qdrant snapshots
-    needs: validate
-    if: github.ref == 'refs/heads/main' && github.event_name == 'schedule'
-    runs-on: [self-hosted, linux, x64, mongodb-infra]
-    timeout-minutes: 90
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.QDRANT_BACKUP_AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: ${{ secrets.QDRANT_BACKUP_AWS_REGION }}
-      QDRANT_BACKUP_S3_BUCKET: ${{ secrets.QDRANT_BACKUP_S3_BUCKET }}
-      QDRANT_BACKUP_S3_PREFIX: ${{ secrets.QDRANT_BACKUP_S3_PREFIX }}
-      QDRANT_SSH_PRIVATE_KEY: ${{ secrets.QDRANT_SSH_PRIVATE_KEY }}
-    steps:
-      - name: Check out scheduled main revision
         uses: actions/checkout@v4
         with:
           persist-credentials: false

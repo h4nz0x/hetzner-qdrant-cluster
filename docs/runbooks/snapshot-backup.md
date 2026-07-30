@@ -1,35 +1,51 @@
 # Qdrant snapshot backup
 
-**Trigger:** automatic production backup every 12 hours from `main`, plus a
-protected manual backup for operator-initiated runs.
+**Trigger:** automatic production backup every 12 hours from a `systemd timer`
+on the Qdrant backup coordinator, plus a protected GitHub Actions manual backup
+for operator-initiated runs.
 
 **Safety:** creates Qdrant collection snapshots and uploads them to S3. It does
-not run Docker Compose, restart containers, change collections, restore data,
-write Terraform state, or run Ansible. S3 retention deletes only whole backup
-prefixes older than the latest two completed backup sets, and only after the
-new backup manifest has uploaded.
+not run Docker Compose, restart containers, change collections, restore data, or
+write Terraform state. S3 retention deletes only whole backup prefixes older
+than the latest two completed backup sets, and only after the new backup
+manifest has uploaded.
 
 ## Schedule
 
-The workflow runs automatically at:
+The production schedule is installed by Ansible as `qdrant-backup.timer` on
+`qdrant-node-1`, the single backup coordinator. It runs at 00:00 and 12:00 UTC:
 
 ```text
-0 */12 * * *
+OnCalendar=*-*-* 00,12:00:00
 ```
 
 That gives an expected recovery point of up to 12 hours and keeps storage cost
 bounded by retaining only the latest two completed backup sets.
 
-Scheduled backups do not use the protected `production` environment because an
-environment approval would block unattended execution. These secrets must exist
-as repository secrets for the scheduled path:
+Install or update the timer with the protected **Production Qdrant Backup Timer
+Rollout** workflow and exact confirmation:
+
+```text
+APPLY_QDRANT_BACKUP_TIMER
+```
+
+The rollout writes the server-local files:
+
+- `/usr/local/bin/qdrant-snapshot-backup.sh`
+- `/usr/local/lib/qdrant-backup/`
+- `/etc/qdrant-backup/backup.env`
+- `/etc/qdrant-backup/qdrant_ssh_key`
+- `/etc/systemd/system/qdrant-backup.service`
+- `/etc/systemd/system/qdrant-backup.timer`
+
+The scheduled path keeps secrets on the coordinator host and does not depend on
+GitHub scheduled workflows or repository secrets.
+
+Required protected environment secrets for the rollout:
 
 - `QDRANT_SSH_PRIVATE_KEY`
 - `QDRANT_BACKUP_AWS_ACCESS_KEY_ID`
 - `QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY`
-- `QDRANT_BACKUP_AWS_REGION`
-- `QDRANT_BACKUP_S3_BUCKET`
-- `QDRANT_BACKUP_S3_PREFIX`
 
 ## Run a manual backup
 
@@ -55,6 +71,9 @@ Required protected environment secrets for manual runs:
 
 The workflow reads `/etc/qdrant/cluster.env` on each Qdrant node for the local
 Qdrant API key. Do not put the Qdrant API key in repository secrets.
+
+GitHub Actions manual backup remains available for operator-triggered backups,
+but the automatic production schedule belongs to the systemd timer.
 
 ## What it does
 

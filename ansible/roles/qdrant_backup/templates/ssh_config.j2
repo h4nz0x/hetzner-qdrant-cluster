@@ -1,0 +1,13 @@
+{% for host in groups['qdrant'] %}
+Host {{ host }}
+  HostName {{ hostvars[host].ansible_host }}
+  User {{ hostvars[host].ansible_user | default('root') }}
+  IdentityFile {{ qdrant_backup_ssh_key_file }}
+  IdentitiesOnly yes
+  StrictHostKeyChecking yes
+  ControlMaster no
+  ControlPath none
+  ServerAliveInterval 15
+  ServerAliveCountMax 3
+
+{% endfor %}
