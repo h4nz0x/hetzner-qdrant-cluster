@@ -11,8 +11,9 @@ network, and local files are removed at the end of the job.
 
 ## Latest successful drill
 
-Runtime proof: workflow run `30586889983` completed successfully on
-2026-07-30. It restored backup `2026-07-30T15:51:46Z` from
+Runtime proof: workflow run `30591333195` completed successfully on
+2026-07-30. It was triggered with `backup_id=latest`, resolved latest to backup
+`2026-07-30T15:51:46Z`, and restored from
 `s3://qdrant-backups-example/production/` into a disposable three-node
 Qdrant cluster on the self-hosted runner.
 
@@ -23,6 +24,7 @@ Verified evidence:
 - Node snapshot uploads: HTTP `200` for `qdrant-node-1`, `qdrant-node-2`, and
   `qdrant-node-3`.
 - Total restored snapshot size: `23924484096` bytes.
+- Latest preflight rejected manifests: 0.
 - Restored collection status: `yellow`.
 - Restored points count: `4226643`.
 - One-point scroll check returned `1` point.
