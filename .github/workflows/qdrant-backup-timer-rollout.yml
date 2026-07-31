@@ -74,6 +74,7 @@ jobs:
         env:
           QDRANT_BACKUP_AWS_ACCESS_KEY_ID: ${{ secrets.QDRANT_BACKUP_AWS_ACCESS_KEY_ID }}
           QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY: ${{ secrets.QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY }}
+          QDRANT_BACKUP_SLACK_WEBHOOK_URL: ${{ secrets.QDRANT_BACKUP_SLACK_WEBHOOK_URL }}
           QDRANT_SSH_PRIVATE_KEY: ${{ secrets.QDRANT_SSH_PRIVATE_KEY }}
         run: |
           set -euo pipefail
@@ -101,6 +102,9 @@ jobs:
               "vault_qdrant_backup_aws_secret_access_key": os.environ[
                   "QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY"
               ],
+              "vault_qdrant_backup_slack_webhook_url": os.environ.get(
+                  "QDRANT_BACKUP_SLACK_WEBHOOK_URL", ""
+              ),
               "vault_qdrant_backup_ssh_private_key": os.environ["QDRANT_SSH_PRIVATE_KEY"],
           }
           lines = ["---"]

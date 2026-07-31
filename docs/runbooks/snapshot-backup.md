@@ -50,6 +50,22 @@ Required protected environment secrets for the rollout:
 - `QDRANT_BACKUP_AWS_ACCESS_KEY_ID`
 - `QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY`
 
+Optional vault value for backup lifecycle Slack notifications:
+
+- `vault_qdrant_backup_slack_webhook_url`
+
+When set, `qdrant-snapshot-backup.sh` sends best-effort Slack messages to the
+Qdrant backup/monitoring channel when a backup starts, succeeds, or fails. A
+Slack delivery problem does not fail the backup. The default channel label is
+`#qdrant-monitoring-alerts`; the incoming webhook itself remains the routing
+source of truth.
+
+Notification colors:
+
+- Started / in progress: bright orange `#f59e0b`
+- Succeeded: green `#2eb67d`
+- Failed: red `#e01e5a`
+
 ## Run a manual backup
 
 1. Open **Production Qdrant Snapshot Backup** in GitHub Actions.
