@@ -171,7 +171,7 @@ printf '%s\n' "$backup_id" > "${report_dir}/backup-id.txt"
 backup_phase="creating collection snapshots"
 send_slack_notification \
   "started" \
-  "${QDRANT_BACKUP_SLACK_STARTED_COLOR:-${BACKUP_SLACK_STARTED_COLOR:-#f59e0b}}" \
+  "${QDRANT_BACKUP_SLACK_STARTED_COLOR:-${BACKUP_SLACK_STARTED_COLOR:-#a855f7}}" \
   "Qdrant snapshot backup started" \
   "Qdrant snapshot backup ${backup_id} has started."
 
