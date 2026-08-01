@@ -62,7 +62,7 @@ source of truth.
 
 Notification colors:
 
-- Started / in progress: bright orange `#f59e0b`
+- Started / in progress: bright purple `#a855f7`
 - Succeeded: green `#2eb67d`
 - Failed: red `#e01e5a`
 
