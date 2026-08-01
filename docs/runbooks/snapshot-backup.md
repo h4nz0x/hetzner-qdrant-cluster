@@ -116,6 +116,19 @@ The artifact contains:
 - `qdrant-backup-summary.md` - operator-readable summary.
 - `delete-prefixes.txt` - S3 backup prefixes selected for retention deletion.
 
+To verify the deployed retention state without starting a backup or deleting
+objects, run the protected **Backup Retention Verification** workflow with:
+
+```text
+VERIFY_BACKUP_RETENTION_READ_ONLY
+```
+
+That workflow lists `s3://qdrant-backups-example/production/`, downloads
+retained `manifest.json` files for validation, verifies at most two backup-set
+prefixes and a fresh newest backup, and uploads sanitized evidence as
+`backup-retention-verification-<run_id>`. It does not create Qdrant snapshots,
+run restore logic, restart containers, or delete S3 objects.
+
 ## Monitoring
 
 The rollout also installs `qdrant-backup-metrics.timer` on `qdrant-node-1`.
