@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for command in aws python3 shellcheck ssh ssh-keygen ssh-keyscan timeout; do
+          for command in aws python3 sha256sum shellcheck ssh ssh-keygen ssh-keyscan stat timeout; do
             if ! command -v "$command" >/dev/null 2>&1; then
               echo "::error::$command is required on the self-hosted runner"
               missing=1
@@ -55,6 +55,9 @@ jobs:
           python3 tests/qdrant-live-audit-test.py
           python3 tests/qdrant-runtime-audit-test.py
           python3 tests/qdrant-backup-test.py
+          test -r scripts/qdrant-s3-object-verify.py
+          test -r scripts/qdrant-stream-verify.py
+          test -r scripts/qdrant-local-cleanup-report.py
           shellcheck --severity=warning scripts/qdrant-backup-node.sh
           shellcheck --severity=warning scripts/qdrant-snapshot-backup.sh
 
@@ -78,7 +81,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Create, upload, and retain Qdrant snapshots
+      - name: Create, verify, retain, and clean up Qdrant snapshots
         run: bash scripts/qdrant-snapshot-backup.sh
 
       - name: Upload sanitized Qdrant backup evidence
@@ -91,6 +94,9 @@ jobs:
             ${{ runner.temp }}/production-qdrant-backup-report/qdrant-backup-manifest.json
             ${{ runner.temp }}/production-qdrant-backup-report/qdrant-backup-summary.md
             ${{ runner.temp }}/production-qdrant-backup-report/delete-prefixes.txt
+            ${{ runner.temp }}/production-qdrant-backup-report/s3-object-verification.jsonl
+            ${{ runner.temp }}/production-qdrant-backup-report/source-stream-verification.jsonl
+            ${{ runner.temp }}/production-qdrant-backup-report/qdrant-local-snapshot-cleanup.json
           retention-days: 30
 
       - name: Remove temporary Qdrant backup material

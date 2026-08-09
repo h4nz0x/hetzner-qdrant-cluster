@@ -14,6 +14,9 @@ from typing import Any
 BACKUP_PREFIX = re.compile(
     r"^(?P<root>.*?)(?P<backup_id>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)/$"
 )
+MANIFEST_KEY = re.compile(
+    r"^(?P<root>.*?)(?P<backup_id>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)/manifest\.json$"
+)
 
 
 class RetentionError(Exception):
@@ -29,6 +32,21 @@ def common_prefixes(payload: dict[str, Any]) -> list[str]:
     return prefixes
 
 
+def completed_prefixes(payload: dict[str, Any]) -> list[str]:
+    if "Contents" not in payload:
+        return common_prefixes(payload)
+
+    prefixes = []
+    for item in payload.get("Contents", []) or []:
+        key = item.get("Key")
+        if not isinstance(key, str):
+            continue
+        match = MANIFEST_KEY.fullmatch(key)
+        if match:
+            prefixes.append(f"{match.group('root')}{match.group('backup_id')}/")
+    return prefixes
+
+
 def select_delete_prefixes(
     payload: dict[str, Any],
     keep: int,
@@ -37,7 +55,7 @@ def select_delete_prefixes(
     if keep < 1:
         raise RetentionError("keep must be at least 1")
     backups: list[tuple[str, str]] = []
-    for prefix in common_prefixes(payload):
+    for prefix in completed_prefixes(payload):
         match = BACKUP_PREFIX.fullmatch(prefix)
         if not match:
             continue

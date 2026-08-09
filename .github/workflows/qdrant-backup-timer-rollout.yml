@@ -68,6 +68,7 @@ jobs:
           python3 tests/qdrant-design-test.py
           python3 tests/qdrant-backup-test.py
           python3 tests/qdrant-backup-timer-test.py
+          shellcheck --severity=warning scripts/qdrant-backup-node.sh
           shellcheck --severity=warning scripts/qdrant-systemd-snapshot-backup.sh
 
       - name: Prepare temporary Qdrant backup vault
@@ -198,6 +199,7 @@ jobs:
           - Scheduler: `systemd timer on qdrant-node-1`
           - Schedule: `00:00/12:00 UTC`
           - Retention: `2 completed backup sets`
+          - Local snapshots: `0 after verified S3 backup`
           - GitHub scheduled backup: disabled
 
           SUMMARY
