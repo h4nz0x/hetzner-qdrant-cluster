@@ -15,6 +15,7 @@ from typing import Any
 EXPECTED_NODES = ("qdrant-node-1", "qdrant-node-2", "qdrant-node-3")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.:-]+$")
 BACKUP_ID = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+SHA256 = re.compile(r"^[A-Fa-f0-9]{64}$")
 
 
 class ManifestError(Exception):
@@ -38,12 +39,18 @@ def require_safe(value: Any, label: str) -> str:
     return value
 
 
+def require_sha256(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not SHA256.fullmatch(value):
+        raise ManifestError(f"{label} must be a 64-character SHA-256")
+    return value.lower()
+
+
 def build_manifest(
     node_json: list[Path],
     backup_id: str,
     bucket: str,
     prefix: str,
-) -> tuple[dict[str, Any], list[dict[str, str]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if not BACKUP_ID.fullmatch(backup_id):
         raise ManifestError("backup_id must be an exact UTC timestamp like 2026-07-29T02:30:00Z")
 
@@ -66,7 +73,7 @@ def build_manifest(
         raise ManifestError(f"missing node payloads: {', '.join(missing)}")
 
     collections_by_node: dict[str, list[dict[str, Any]]] = {}
-    upload_plan: list[dict[str, str]] = []
+    upload_plan: list[dict[str, Any]] = []
     for node in EXPECTED_NODES:
         payload = by_node[node]
         if payload.get("backup_id") != backup_id:
@@ -84,12 +91,15 @@ def build_manifest(
             size = item.get("size")
             if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
                 raise ManifestError(f"{node}/{collection} has invalid snapshot size")
+            checksum = require_sha256(
+                item.get("checksum"), f"{node}/{collection} checksum"
+            )
             normalized.append(
                 {
                     "collection": collection,
                     "snapshot_name": snapshot_name,
                     "size": size,
-                    "checksum": item.get("checksum"),
+                    "checksum": checksum,
                     "creation_time": item.get("creation_time"),
                 }
             )
@@ -103,6 +113,8 @@ def build_manifest(
                     "collection": collection,
                     "snapshot_name": snapshot_name,
                     "s3_key": s3_key,
+                    "size": size,
+                    "checksum": checksum,
                 }
             )
         collections_by_node[node] = sorted(normalized, key=lambda row: row["collection"])
@@ -191,7 +203,14 @@ def main(argv: list[str] | None = None) -> int:
     args.upload_tsv.write_text(
         "".join(
             "\t".join(
-                [item["node"], item["collection"], item["snapshot_name"], item["s3_key"]]
+                [
+                    item["node"],
+                    item["collection"],
+                    item["snapshot_name"],
+                    item["s3_key"],
+                    str(item["size"]),
+                    item["checksum"],
+                ]
             )
             + "\n"
             for item in upload_plan

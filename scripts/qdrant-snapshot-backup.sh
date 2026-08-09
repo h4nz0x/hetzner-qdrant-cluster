@@ -30,6 +30,9 @@ install -d -m 0700 "$ssh_dir" "$raw_dir" "$report_dir"
 printf '%s\n' "$QDRANT_SSH_PRIVATE_KEY" > "$key_file"
 chmod 0600 "$key_file"
 install -m 0600 /dev/null "$known_hosts_file"
+install -m 0600 /dev/null "${report_dir}/s3-object-verification.jsonl"
+install -m 0600 /dev/null "${report_dir}/source-stream-verification.jsonl"
+install -m 0600 /dev/null "${report_dir}/local-snapshot-deletions.jsonl"
 
 cat > "$config_file" <<EOF
 Host qdrant-node-1
@@ -103,13 +106,37 @@ python3 scripts/qdrant-backup-manifest.py \
   --output-md "${report_dir}/qdrant-backup-summary.md" \
   --upload-tsv "${report_dir}/qdrant-backup-upload.tsv"
 
-while IFS=$'\t' read -r node collection snapshot_name s3_key; do
+while IFS=$'\t' read -r node collection snapshot_name s3_key expected_size expected_checksum; do
+  object_uri="s3://${QDRANT_BACKUP_S3_BUCKET}/${s3_key}"
+  stream_report="${raw_dir}/stream-${node}-${collection}.json"
   timeout 900 ssh \
     -F "$config_file" \
     "$node" \
     "${remote_cmd} download ${collection} ${snapshot_name}" \
     < scripts/qdrant-backup-node.sh \
-    | aws s3 cp - "s3://${QDRANT_BACKUP_S3_BUCKET}/${s3_key}"
+    | python3 scripts/qdrant-stream-verify.py \
+        --expected-size "$expected_size" \
+        --expected-sha256 "$expected_checksum" \
+        --object "$object_uri" \
+        --report "$stream_report" \
+    | aws s3 cp - "$object_uri" \
+        --expected-size "$expected_size" \
+        --checksum-algorithm SHA256 \
+        --metadata "qdrant-sha256=${expected_checksum}" \
+        --only-show-errors
+  cat "$stream_report" >> "${report_dir}/source-stream-verification.jsonl"
+  rm -f "$stream_report"
+
+  aws s3api head-object \
+    --bucket "$QDRANT_BACKUP_S3_BUCKET" \
+    --key "$s3_key" \
+    --checksum-mode ENABLED \
+    --output json \
+    | python3 scripts/qdrant-s3-object-verify.py \
+        --expected-size "$expected_size" \
+        --expected-sha256 "$expected_checksum" \
+        --object "$object_uri" \
+        >> "${report_dir}/s3-object-verification.jsonl"
 done < "${report_dir}/qdrant-backup-upload.tsv"
 
 manifest_file="${report_dir}/qdrant-backup-manifest.json"
@@ -122,13 +149,31 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     print(json.load(handle)["manifest_key"])
 PY
 )"
-aws s3 cp "$manifest_file" "s3://${QDRANT_BACKUP_S3_BUCKET}/${manifest_key}"
+manifest_size="$(stat -c %s "$manifest_file")"
+manifest_checksum="$(sha256sum "$manifest_file")"
+manifest_checksum="${manifest_checksum%% *}"
+manifest_uri="s3://${QDRANT_BACKUP_S3_BUCKET}/${manifest_key}"
+aws s3 cp "$manifest_file" "$manifest_uri" \
+  --checksum-algorithm SHA256 \
+  --metadata "qdrant-sha256=${manifest_checksum}" \
+  --only-show-errors
+
+aws s3api head-object \
+  --bucket "$QDRANT_BACKUP_S3_BUCKET" \
+  --key "$manifest_key" \
+  --checksum-mode ENABLED \
+  --output json \
+  | python3 scripts/qdrant-s3-object-verify.py \
+      --expected-size "$manifest_size" \
+      --expected-sha256 "$manifest_checksum" \
+      --object "$manifest_uri" \
+      >> "${report_dir}/s3-object-verification.jsonl"
 
 prefix="${QDRANT_BACKUP_S3_PREFIX%/}/"
 aws s3api list-objects-v2 \
   --bucket "$QDRANT_BACKUP_S3_BUCKET" \
   --prefix "$prefix" \
-  --delimiter "/" \
+  --output json \
   > "${report_dir}/s3-prefixes.json"
 
 python3 scripts/qdrant-s3-retention-plan.py \
@@ -141,6 +186,20 @@ while IFS= read -r delete_prefix; do
   [[ -z "$delete_prefix" ]] && continue
   aws s3 rm "s3://${QDRANT_BACKUP_S3_BUCKET}/${delete_prefix}" --recursive
 done < "${report_dir}/delete-prefixes.txt"
+
+while IFS=$'\t' read -r node collection snapshot_name _ expected_size expected_checksum; do
+  timeout 300 ssh \
+    -F "$config_file" \
+    "$node" \
+    "${remote_cmd} delete ${node} ${collection} ${snapshot_name} ${expected_size} ${expected_checksum}" \
+    < scripts/qdrant-backup-node.sh \
+    >> "${report_dir}/local-snapshot-deletions.jsonl"
+done < "${report_dir}/qdrant-backup-upload.tsv"
+
+python3 scripts/qdrant-local-cleanup-report.py \
+  --manifest "$manifest_file" \
+  --deletions-jsonl "${report_dir}/local-snapshot-deletions.jsonl" \
+  --output "${report_dir}/qdrant-local-snapshot-cleanup.json"
 
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
   cat "${report_dir}/qdrant-backup-summary.md" >> "$GITHUB_STEP_SUMMARY"

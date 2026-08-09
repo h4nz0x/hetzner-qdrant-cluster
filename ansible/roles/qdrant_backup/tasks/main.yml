@@ -220,6 +220,9 @@
     - qdrant-backup-manifest.py
     - qdrant-backup-metrics.py
     - qdrant-s3-retention-plan.py
+    - qdrant-s3-object-verify.py
+    - qdrant-stream-verify.py
+    - qdrant-local-cleanup-report.py
 
 - name: Install Qdrant systemd backup coordinator script
   ansible.builtin.copy:

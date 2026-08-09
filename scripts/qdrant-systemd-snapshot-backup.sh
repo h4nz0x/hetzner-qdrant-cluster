@@ -8,6 +8,9 @@ ssh_config="${QDRANT_BACKUP_SSH_CONFIG:-/etc/qdrant-backup/ssh_config}"
 node_script="${lib_dir}/qdrant-backup-node.sh"
 manifest_script="${lib_dir}/qdrant-backup-manifest.py"
 retention_script="${lib_dir}/qdrant-s3-retention-plan.py"
+s3_verify_script="${lib_dir}/qdrant-s3-object-verify.py"
+stream_verify_script="${lib_dir}/qdrant-stream-verify.py"
+cleanup_report_script="${lib_dir}/qdrant-local-cleanup-report.py"
 remote_cmd='/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash -s --'
 nodes=(qdrant-node-1 qdrant-node-2 qdrant-node-3)
 host_ips=(203.0.113.11 203.0.113.12 203.0.113.13)
@@ -129,14 +132,21 @@ for name in "${required_vars[@]}"; do
   fi
 done
 
-for command in aws date mktemp python3 ssh ssh-keygen ssh-keyscan timeout; do
+for command in aws date mktemp python3 sha256sum ssh ssh-keygen ssh-keyscan stat timeout; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'missing required command: %s\n' "$command" >&2
     exit 2
   }
 done
 
-for file in "$node_script" "$manifest_script" "$retention_script" "$ssh_config"; do
+for file in \
+  "$node_script" \
+  "$manifest_script" \
+  "$retention_script" \
+  "$s3_verify_script" \
+  "$stream_verify_script" \
+  "$cleanup_report_script" \
+  "$ssh_config"; do
   if [[ ! -r "$file" ]]; then
     printf 'required backup file is missing or unreadable: %s\n' "$file" >&2
     exit 2
@@ -151,6 +161,9 @@ known_hosts_file="${run_dir}/known_hosts"
 latest_dir="${state_dir}/latest"
 install -d -m 0700 "$raw_dir" "$report_dir"
 install -m 0600 /dev/null "$known_hosts_file"
+install -m 0600 /dev/null "${report_dir}/s3-object-verification.jsonl"
+install -m 0600 /dev/null "${report_dir}/source-stream-verification.jsonl"
+install -m 0600 /dev/null "${report_dir}/local-snapshot-deletions.jsonl"
 
 cleanup() {
   rm -rf "$run_dir"
@@ -198,14 +211,39 @@ python3 "$manifest_script" \
   --upload-tsv "${report_dir}/qdrant-backup-upload.tsv"
 
 backup_phase="uploading snapshots to S3"
-while IFS=$'\t' read -r node collection snapshot_name s3_key; do
+while IFS=$'\t' read -r node collection snapshot_name s3_key expected_size expected_checksum; do
+  object_uri="s3://${QDRANT_BACKUP_S3_BUCKET}/${s3_key}"
+  stream_report="${run_dir}/stream-${node}-${collection}.json"
   timeout 900 ssh \
     -F "$ssh_config" \
     -o "UserKnownHostsFile=${known_hosts_file}" \
     "$node" \
     "${remote_cmd} download ${collection} ${snapshot_name}" \
     < "$node_script" \
-    | aws s3 cp - "s3://${QDRANT_BACKUP_S3_BUCKET}/${s3_key}"
+    | python3 "$stream_verify_script" \
+        --expected-size "$expected_size" \
+        --expected-sha256 "$expected_checksum" \
+        --object "$object_uri" \
+        --report "$stream_report" \
+    | aws s3 cp - "$object_uri" \
+        --expected-size "$expected_size" \
+        --checksum-algorithm SHA256 \
+        --metadata "qdrant-sha256=${expected_checksum}" \
+        --only-show-errors
+  cat "$stream_report" >> "${report_dir}/source-stream-verification.jsonl"
+
+  backup_phase="verifying uploaded snapshot ${node}/${collection}"
+  aws s3api head-object \
+    --bucket "$QDRANT_BACKUP_S3_BUCKET" \
+    --key "$s3_key" \
+    --checksum-mode ENABLED \
+    --output json \
+    | python3 "$s3_verify_script" \
+        --expected-size "$expected_size" \
+        --expected-sha256 "$expected_checksum" \
+        --object "$object_uri" \
+        >> "${report_dir}/s3-object-verification.jsonl"
+  backup_phase="uploading snapshots to S3"
 done < "${report_dir}/qdrant-backup-upload.tsv"
 
 manifest_file="${report_dir}/qdrant-backup-manifest.json"
@@ -218,14 +256,33 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     print(json.load(handle)["manifest_key"])
 PY
 )"
-aws s3 cp "$manifest_file" "s3://${QDRANT_BACKUP_S3_BUCKET}/${manifest_key}"
+manifest_size="$(stat -c %s "$manifest_file")"
+manifest_checksum="$(sha256sum "$manifest_file")"
+manifest_checksum="${manifest_checksum%% *}"
+manifest_uri="s3://${QDRANT_BACKUP_S3_BUCKET}/${manifest_key}"
+aws s3 cp "$manifest_file" "$manifest_uri" \
+  --checksum-algorithm SHA256 \
+  --metadata "qdrant-sha256=${manifest_checksum}" \
+  --only-show-errors
+
+backup_phase="verifying uploaded manifest"
+aws s3api head-object \
+  --bucket "$QDRANT_BACKUP_S3_BUCKET" \
+  --key "$manifest_key" \
+  --checksum-mode ENABLED \
+  --output json \
+  | python3 "$s3_verify_script" \
+      --expected-size "$manifest_size" \
+      --expected-sha256 "$manifest_checksum" \
+      --object "$manifest_uri" \
+      >> "${report_dir}/s3-object-verification.jsonl"
 
 backup_phase="applying S3 retention"
 prefix="${QDRANT_BACKUP_S3_PREFIX%/}/"
 aws s3api list-objects-v2 \
   --bucket "$QDRANT_BACKUP_S3_BUCKET" \
   --prefix "$prefix" \
-  --delimiter "/" \
+  --output json \
   > "${report_dir}/s3-prefixes.json"
 
 python3 "$retention_script" \
@@ -239,11 +296,32 @@ while IFS= read -r delete_prefix; do
   aws s3 rm "s3://${QDRANT_BACKUP_S3_BUCKET}/${delete_prefix}" --recursive
 done < "${report_dir}/delete-prefixes.txt"
 
+backup_phase="deleting verified local snapshots"
+while IFS=$'\t' read -r node collection snapshot_name _ expected_size expected_checksum; do
+  backup_phase="deleting verified local snapshot ${node}/${collection}"
+  timeout 300 ssh \
+    -F "$ssh_config" \
+    -o "UserKnownHostsFile=${known_hosts_file}" \
+    "$node" \
+    "${remote_cmd} delete ${node} ${collection} ${snapshot_name} ${expected_size} ${expected_checksum}" \
+    < "$node_script" \
+    >> "${report_dir}/local-snapshot-deletions.jsonl"
+done < "${report_dir}/qdrant-backup-upload.tsv"
+
+backup_phase="validating local snapshot cleanup evidence"
+python3 "$cleanup_report_script" \
+  --manifest "$manifest_file" \
+  --deletions-jsonl "${report_dir}/local-snapshot-deletions.jsonl" \
+  --output "${report_dir}/qdrant-local-snapshot-cleanup.json"
+
 rm -rf "$latest_dir"
 install -d -m 0750 "$latest_dir"
 cp "${report_dir}/qdrant-backup-manifest.json" "$latest_dir/"
 cp "${report_dir}/qdrant-backup-summary.md" "$latest_dir/"
 cp "${report_dir}/delete-prefixes.txt" "$latest_dir/"
+cp "${report_dir}/s3-object-verification.jsonl" "$latest_dir/"
+cp "${report_dir}/source-stream-verification.jsonl" "$latest_dir/"
+cp "${report_dir}/qdrant-local-snapshot-cleanup.json" "$latest_dir/"
 chmod 0640 "$latest_dir"/*
 
 cat "${report_dir}/qdrant-backup-summary.md"

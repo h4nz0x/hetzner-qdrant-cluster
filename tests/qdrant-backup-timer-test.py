@@ -62,6 +62,9 @@ class QdrantBackupTimerTest(unittest.TestCase):
             "Recreate standalone Docker node_exporter",
             "--collector.textfile.directory=/host",
             "qdrant-s3-retention-plan.py",
+            "qdrant-s3-object-verify.py",
+            "qdrant-stream-verify.py",
+            "qdrant-local-cleanup-report.py",
             "Install Qdrant backup AWS CLI",
             "qdrant_backup_awscli_url",
             "/usr/local/bin/aws --version",
@@ -82,6 +85,7 @@ class QdrantBackupTimerTest(unittest.TestCase):
         self.assertIn("AWS_ACCESS_KEY_ID={{ vault_qdrant_backup_aws_access_key_id | quote }}", env_template)
         self.assertIn("qdrant-backup-metrics.py", metrics_service)
         self.assertIn("{{ qdrant_backup_state_dir }}/latest/qdrant-backup-manifest.json", metrics_service)
+        self.assertIn("--cleanup-report", metrics_service)
         self.assertIn("qdrant_backup_metrics_textfile_dir: /var/lib/node_exporter/textfile", defaults)
         self.assertIn("qdrant_backup_metrics_file:", defaults)
         self.assertIn("OnUnitActiveSec=5m", metrics_timer)
@@ -97,11 +101,19 @@ class QdrantBackupTimerTest(unittest.TestCase):
             "qdrant-node-3",
             "qdrant-backup-manifest.py",
             "qdrant-s3-retention-plan.py",
+            "qdrant-s3-object-verify.py",
+            "qdrant-stream-verify.py",
+            "qdrant-local-cleanup-report.py",
             "QDRANT_BACKUP_RETENTION_KEEP:-2",
             "aws s3 cp",
+            "aws s3api head-object",
+            "--checksum-algorithm SHA256",
+            "--checksum-mode ENABLED",
+            "${remote_cmd} delete",
             "aws s3 rm",
         ):
             self.assertIn(required, script)
+        self.assertLess(script.index("--checksum-mode ENABLED"), script.index("${remote_cmd} delete"))
         for forbidden in ("docker compose", "terraform", "systemctl restart qdrant"):
             self.assertNotIn(forbidden, script)
 
@@ -147,6 +159,9 @@ class QdrantBackupTimerTest(unittest.TestCase):
             "qdrant_backup_total_bytes",
             "qdrant_backup_manifest_present",
             "qdrant_backup_metric_export_timestamp_seconds",
+            "qdrant_backup_local_snapshot_cleanup_success",
+            "qdrant_backup_local_snapshots_deleted",
+            "qdrant_backup_local_snapshots_remaining",
         ):
             self.assertIn(required, script)
         self.assertIn("qdrant_backup.prom", script)

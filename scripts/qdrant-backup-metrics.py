@@ -14,6 +14,9 @@ from typing import Any
 
 
 DEFAULT_MANIFEST = Path("/var/lib/qdrant-backup/latest/qdrant-backup-manifest.json")
+DEFAULT_CLEANUP_REPORT = Path(
+    "/var/lib/qdrant-backup/latest/qdrant-local-snapshot-cleanup.json"
+)
 DEFAULT_OUTPUT = Path("/var/lib/node_exporter/textfile/qdrant_backup.prom")
 
 
@@ -60,6 +63,12 @@ def failure_metrics(cluster: str, environment: str, reason: str, retention_keep:
     lines.append(f"qdrant_backup_manifest_present{reason_labels} 0")
     lines += metric_header("qdrant_backup_last_success", "1 if the latest Qdrant backup manifest represents a valid completed backup.")
     lines.append(f"qdrant_backup_last_success{reason_labels} 0")
+    lines += metric_header("qdrant_backup_local_snapshot_cleanup_success", "1 if local snapshots from the latest backup were deleted through the Qdrant API.")
+    lines.append(f"qdrant_backup_local_snapshot_cleanup_success{base} 0")
+    lines += metric_header("qdrant_backup_local_snapshots_deleted", "Number of local snapshots deleted after the latest verified S3 backup.")
+    lines.append(f"qdrant_backup_local_snapshots_deleted{base} 0")
+    lines += metric_header("qdrant_backup_local_snapshots_remaining", "Number of local collection snapshots remaining after cleanup; -1 means unknown.")
+    lines.append(f"qdrant_backup_local_snapshots_remaining{base} -1")
     lines += metric_header("qdrant_backup_retention_keep", "Configured number of completed Qdrant backup prefixes retained in S3.")
     lines.append(f"qdrant_backup_retention_keep{base} {retention_keep}")
     lines += metric_header("qdrant_backup_metric_export_timestamp_seconds", "Unix timestamp of the latest Qdrant backup metric export attempt.")
@@ -69,6 +78,7 @@ def failure_metrics(cluster: str, environment: str, reason: str, retention_keep:
 
 def success_metrics(
     manifest: dict[str, Any],
+    cleanup_report: dict[str, Any] | None,
     cluster: str,
     environment: str,
     retention_keep: int,
@@ -112,6 +122,35 @@ def success_metrics(
     backup_ts = parse_timestamp(backup_id)
     generated_ts = parse_timestamp(generated_at)
 
+    cleanup_success = 0
+    deleted_snapshots = 0
+    remaining_snapshots = -1
+    if cleanup_report is not None:
+        try:
+            cleanup_backup_id = cleanup_report.get("backup_id")
+            cleanup_status = cleanup_report.get("status")
+            cleanup_expected = cleanup_report.get("expected_snapshots")
+            cleanup_deleted = cleanup_report.get("deleted_snapshots")
+            cleanup_remaining = cleanup_report.get("remaining_snapshots")
+            if cleanup_backup_id != backup_id:
+                raise ValueError("cleanup report backup_id does not match manifest")
+            if cleanup_status != "succeeded":
+                raise ValueError("cleanup report did not succeed")
+            if any(
+                not isinstance(value, int) or isinstance(value, bool)
+                for value in (cleanup_expected, cleanup_deleted, cleanup_remaining)
+            ):
+                raise ValueError("cleanup report counts are invalid")
+            if cleanup_expected != len(upload_plan) or cleanup_deleted != len(upload_plan):
+                raise ValueError("cleanup report snapshot count does not match manifest")
+            if cleanup_remaining != 0:
+                raise ValueError("cleanup report has remaining local snapshots")
+            cleanup_success = 1
+            deleted_snapshots = cleanup_deleted
+            remaining_snapshots = cleanup_remaining
+        except (AttributeError, TypeError, ValueError):
+            pass
+
     lines: list[str] = []
     lines += metric_header("qdrant_backup_manifest_present", "1 if the latest Qdrant backup manifest exists and is parseable.")
     lines.append(f"qdrant_backup_manifest_present{ok} 1")
@@ -129,6 +168,12 @@ def success_metrics(
     lines.append(f"qdrant_backup_collections{base} {len(collections)}")
     lines += metric_header("qdrant_backup_total_bytes", "Total bytes across all Qdrant collection snapshots in the latest backup manifest.")
     lines.append(f"qdrant_backup_total_bytes{base} {total_bytes}")
+    lines += metric_header("qdrant_backup_local_snapshot_cleanup_success", "1 if local snapshots from the latest backup were deleted through the Qdrant API.")
+    lines.append(f"qdrant_backup_local_snapshot_cleanup_success{base} {cleanup_success}")
+    lines += metric_header("qdrant_backup_local_snapshots_deleted", "Number of local snapshots deleted after the latest verified S3 backup.")
+    lines.append(f"qdrant_backup_local_snapshots_deleted{base} {deleted_snapshots}")
+    lines += metric_header("qdrant_backup_local_snapshots_remaining", "Number of local collection snapshots remaining after cleanup; -1 means unknown.")
+    lines.append(f"qdrant_backup_local_snapshots_remaining{base} {remaining_snapshots}")
     lines += metric_header("qdrant_backup_retention_keep", "Configured number of completed Qdrant backup prefixes retained in S3.")
     lines.append(f"qdrant_backup_retention_keep{base} {retention_keep}")
     lines += metric_header("qdrant_backup_metric_export_timestamp_seconds", "Unix timestamp of the latest Qdrant backup metric export attempt.")
@@ -156,6 +201,7 @@ def write_textfile(path: Path, lines: list[str]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export Qdrant backup metrics")
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--cleanup-report", type=Path, default=DEFAULT_CLEANUP_REPORT)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--cluster", default="qdrant")
     parser.add_argument("--environment", default="production")
@@ -167,8 +213,14 @@ def main() -> int:
     args = parse_args()
     try:
         manifest = read_manifest(args.manifest)
+        cleanup_report = None
+        try:
+            cleanup_report = read_manifest(args.cleanup_report)
+        except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+            pass
         lines = success_metrics(
             manifest=manifest,
+            cleanup_report=cleanup_report,
             cluster=args.cluster,
             environment=args.environment,
             retention_keep=args.retention_keep,

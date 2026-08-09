@@ -4,11 +4,13 @@
 on the Qdrant backup coordinator, plus a protected GitHub Actions manual backup
 for operator-initiated runs.
 
-**Safety:** creates Qdrant collection snapshots and uploads them to S3. It does
-not run Docker Compose, restart containers, change collections, restore data, or
-write Terraform state. S3 retention deletes only whole backup prefixes older
-than the latest two completed backup sets, and only after the new backup
-manifest has uploaded.
+**Safety:** creates Qdrant collection snapshots, verifies the streamed bytes and
+uploaded S3 objects, then deletes only those exact local snapshots through the
+Qdrant collection-snapshot API. It does not remove snapshot files directly, run
+Docker Compose, restart containers, change collections, restore data, or write
+Terraform state. S3 retention deletes only whole backup prefixes older than the
+latest two completed backup sets, and only after the new backup manifest has
+uploaded and passed verification.
 
 ## Schedule
 
@@ -96,16 +98,55 @@ but the automatic production schedule belongs to the systemd timer.
 
 ## What it does
 
-- Creates one collection snapshot per collection on each Qdrant node.
-- Builds a sanitized manifest for the three-node backup set.
-- Streams each snapshot over SSH and uploads it to:
+The scheduled and manual implementations use the same guarded sequence:
 
-  ```text
-  s3://<bucket>/<prefix>/<backup_id>/nodes/<node>/collections/<collection>/<snapshot>
-  ```
+1. Create one collection snapshot per collection on each Qdrant node.
+2. Build a sanitized manifest for the complete three-node backup set. Manifest
+   construction fails unless every snapshot has a positive size and a valid
+   64-character SHA-256 reported by Qdrant.
+3. Stream each snapshot over SSH. While streaming, recompute its byte count and
+   SHA-256 and require both to match the manifest.
+4. Upload the verified stream to:
 
-- Uploads `manifest.json` under the backup-set prefix.
-- Keeps only the latest two completed backup-set prefixes in S3.
+   ```text
+   s3://<bucket>/<prefix>/<backup_id>/nodes/<node>/collections/<collection>/<snapshot>
+   ```
+
+5. Ask S3 to calculate and retain a SHA-256 checksum. Record Qdrant's full-file
+   SHA-256 as object metadata.
+6. Read each object back with `head-object --checksum-mode ENABLED` and require
+   the exact size, Qdrant SHA-256 metadata, an S3 checksum, an ETag, and supported
+   server-side encryption.
+7. Upload and verify `manifest.json` using the same S3 checks.
+8. Keep only the latest two completed backup-set prefixes in S3. A prefix counts
+   as completed only when it contains `manifest.json`; a partial failed upload
+   cannot displace a valid recovery set.
+9. For each manifest entry, ask the owning Qdrant node to delete that exact local
+   snapshot. Before deletion, the node rechecks its name, size, and SHA-256.
+10. Re-list collection snapshots and require the deleted name to be absent and
+    zero local snapshots to remain. Write the cleanup report only when every
+    manifest entry passes.
+
+The local retention target is zero because S3 is the durable backup location.
+This prevents `/qdrant/snapshots` inside the Qdrant container writable layer
+from growing after every 12-hour backup.
+
+## Failure behavior
+
+Local cleanup cannot start until all snapshots and `manifest.json` pass S3
+verification. If creation, streaming, upload, verification, or S3 retention
+fails, the run exits nonzero and leaves the local snapshots available for
+investigation. If a guarded Qdrant API deletion fails, the run also exits
+nonzero and the cleanup report is not published as successful.
+
+An incomplete S3 prefix from a failed run is not treated as a completed backup
+and is not allowed to evict either retained recovery set. It is preserved for
+investigation and remains visible to the read-only retention verification; only
+remove it after confirming that the run failed and has no valid manifest.
+
+The cleanup code never uses `rm`, `docker system prune`, or a collection-delete
+endpoint. A failed run sends the existing red Slack lifecycle notification; a
+successful cleanup remains part of the green backup-success path.
 
 ## Evidence
 
@@ -115,6 +156,24 @@ The artifact contains:
   and S3 key metadata.
 - `qdrant-backup-summary.md` - operator-readable summary.
 - `delete-prefixes.txt` - S3 backup prefixes selected for retention deletion.
+- `source-stream-verification.jsonl` - byte count and full-file SHA-256 computed
+  while each immutable snapshot is streamed from its Qdrant node.
+- `s3-object-verification.jsonl` - sanitized S3 size, checksum, ETag, and
+  encryption verification for every snapshot object and `manifest.json`.
+- `qdrant-local-snapshot-cleanup.json` - exact local deletion count by node and
+  the required zero remaining snapshot count.
+
+The scheduled coordinator publishes the same latest-run evidence under:
+
+```text
+/var/lib/qdrant-backup/latest/
+```
+
+Read the cleanup result without changing Qdrant:
+
+```bash
+sudo cat /var/lib/qdrant-backup/latest/qdrant-local-snapshot-cleanup.json
+```
 
 To verify the deployed retention state without starting a backup or deleting
 objects, run the protected **Backup Retention Verification** workflow with:
@@ -136,6 +195,7 @@ Every five minutes it reads:
 
 ```text
 /var/lib/qdrant-backup/latest/qdrant-backup-manifest.json
+/var/lib/qdrant-backup/latest/qdrant-local-snapshot-cleanup.json
 ```
 
 and writes node_exporter textfile metrics to:
@@ -152,6 +212,15 @@ target. The key recovery signals are:
 - `qdrant_backup_snapshot_objects`
 - `qdrant_backup_nodes`
 - `qdrant_backup_total_bytes`
+- `qdrant_backup_local_snapshot_cleanup_success`
+- `qdrant_backup_local_snapshots_deleted`
+- `qdrant_backup_local_snapshots_remaining`
+
+For a backup produced by the cleanup-aware implementation, healthy values are
+`qdrant_backup_local_snapshot_cleanup_success 1` and
+`qdrant_backup_local_snapshots_remaining 0`. The remaining-snapshot metric is
+`-1` when cleanup evidence is not yet available, including the transition from
+an older deployed backup version.
 
 On the current live Qdrant hosts, `node_exporter` runs as a standalone Docker
 container. The rollout makes that container read the host textfile directory
