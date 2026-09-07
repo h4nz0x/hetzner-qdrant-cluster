@@ -69,14 +69,14 @@ jobs:
           esac
           test -n "$HCLOUD_TOKEN" || { echo "::error::HCLOUD_TOKEN secret is missing"; exit 1; }
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 

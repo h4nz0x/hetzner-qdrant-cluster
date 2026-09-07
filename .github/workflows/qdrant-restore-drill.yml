@@ -65,7 +65,7 @@ jobs:
           # An empty endpoint means AWS S3; unset it so the CLI does not send an empty URL.
           [[ -n "${AWS_ENDPOINT_URL:-}" ]] || echo "AWS_ENDPOINT_URL=" >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run unit tests for the drill helpers
         run: |
@@ -234,7 +234,7 @@ jobs:
 
       - name: Upload evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qdrant-restore-drill-${{ github.run_id }}
           if-no-files-found: warn
