@@ -1,0 +1,83 @@
+name: Qdrant backup (manual)
+
+# Triggers the same systemd backup job that runs on the coordinator twice a
+# day, and shows its summary. Useful before an upgrade or a risky change.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type BACKUP to confirm"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qdrant-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    name: Run snapshot backup on the coordinator
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 120
+    steps:
+      - name: Check confirmation
+        run: |
+          [[ "${{ inputs.confirmation }}" == "BACKUP" ]] || { echo "::error::type BACKUP to confirm"; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Find the backup coordinator
+        working-directory: terraform
+        env:
+          HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          cp backend_override.tf.example backend_override.tf
+          printf '%s\n' "${{ secrets.TF_BACKEND_HCL }}" > backend.hcl
+          terraform init -input=false -backend-config=backend.hcl >/dev/null
+          coordinator="$(terraform output -json ansible_inventory | python3 -c 'import json,sys; print(json.load(sys.stdin)["nodes"][0]["public_ip"])')"
+          echo "COORDINATOR=${coordinator}" >> "$GITHUB_ENV"
+
+      - name: Prepare SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 0600 ~/.ssh/id_ed25519
+          ssh-keyscan -T 10 -t ed25519 "$COORDINATOR" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keygen -F "$COORDINATOR" -f ~/.ssh/known_hosts >/dev/null
+
+      - name: Run backup
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes "root@${COORDINATOR}" 'systemctl start --wait qdrant-backup.service'
+          {
+            echo '### Qdrant snapshot backup'
+            ssh -o BatchMode=yes "root@${COORDINATOR}" 'cat /var/lib/qdrant-backup/latest/qdrant-backup-summary.md'
+            echo
+            echo '```json'
+            ssh -o BatchMode=yes "root@${COORDINATOR}" 'cat /var/lib/qdrant-backup/latest/qdrant-local-snapshot-cleanup.json'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show journal on failure
+        if: failure()
+        run: ssh -o BatchMode=yes "root@${COORDINATOR}" 'journalctl -u qdrant-backup.service --no-pager -n 200' || true
+
+      - name: Clean up
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519 terraform/backend.hcl

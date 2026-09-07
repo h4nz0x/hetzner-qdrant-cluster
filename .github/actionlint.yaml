@@ -1,0 +1,3 @@
+# No self-hosted runners; everything runs on ubuntu-latest.
+self-hosted-runner:
+  labels: []

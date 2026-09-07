@@ -1,0 +1,252 @@
+name: Qdrant restore drill
+
+# Proves a backup is restorable WITHOUT touching the live cluster: downloads
+# the snapshots of one collection from S3, starts a throwaway Qdrant cluster
+# with Docker on the runner, restores into it and checks the data is there.
+# Run it after every backup change and at least monthly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type DRILL to confirm"
+        required: true
+        type: string
+      backup_id:
+        description: "Backup ID to restore (for example 2026-07-29T10:27:49Z) or `latest`"
+        required: true
+        type: string
+        default: latest
+      collection:
+        description: "Collection to restore; empty picks the first one present on every node"
+        required: false
+        type: string
+        default: ""
+      qdrant_image:
+        description: "Qdrant image for the throwaway cluster (match the live version)"
+        required: false
+        type: string
+        default: qdrant/qdrant:v1.17.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qdrant-restore-drill
+  cancel-in-progress: false
+
+jobs:
+  drill:
+    name: Restore into a disposable cluster
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 90
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.BACKUP_S3_REGION }}
+      AWS_ENDPOINT_URL: ${{ secrets.BACKUP_S3_ENDPOINT_URL }}
+      QDRANT_BACKUP_S3_BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+      QDRANT_BACKUP_S3_PREFIX: ${{ secrets.BACKUP_S3_PREFIX }}
+      RESTORE_BACKUP_ID: ${{ inputs.backup_id }}
+      RESTORE_COLLECTION: ${{ inputs.collection }}
+      RESTORE_IMAGE: ${{ inputs.qdrant_image }}
+    steps:
+      - name: Check confirmation and inputs
+        run: |
+          set -euo pipefail
+          [[ "${{ inputs.confirmation }}" == "DRILL" ]] || { echo "::error::type DRILL to confirm"; exit 1; }
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION QDRANT_BACKUP_S3_BUCKET QDRANT_BACKUP_S3_PREFIX; do
+            [[ -n "${!name}" ]] || { echo "::error::${name} is not configured"; exit 1; }
+          done
+          if [[ "$RESTORE_BACKUP_ID" != "latest" && ! "$RESTORE_BACKUP_ID" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+            echo "::error::backup_id must be latest or an exact UTC timestamp"; exit 1
+          fi
+          # An empty endpoint means AWS S3; unset it so the CLI does not send an empty URL.
+          [[ -n "${AWS_ENDPOINT_URL:-}" ]] || echo "AWS_ENDPOINT_URL=" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+
+      - name: Run unit tests for the drill helpers
+        run: |
+          python3 tests/qdrant-restore-drill-test.py
+          python3 tests/qdrant-latest-restore-preflight-test.py
+
+      - name: Prepare workspace
+        run: |
+          set -euo pipefail
+          drill_dir="${RUNNER_TEMP}/qdrant-restore-drill"
+          install -d -m 0755 "$drill_dir/report" "$drill_dir/manifests"
+          install -d -m 0777 "$drill_dir/snapshots" "$drill_dir/storage"
+          {
+            echo "DRILL_DIR=${drill_dir}"
+            echo "REPORT_DIR=${drill_dir}/report"
+            echo "MANIFEST_DIR=${drill_dir}/manifests"
+            echo "SNAPSHOT_DIR=${drill_dir}/snapshots"
+            echo "STORAGE_DIR=${drill_dir}/storage"
+          } >> "$GITHUB_ENV"
+
+      - name: Resolve `latest` to an exact backup
+        if: inputs.backup_id == 'latest'
+        run: |
+          set -euo pipefail
+          prefix="${QDRANT_BACKUP_S3_PREFIX%/}/"
+          aws s3api list-objects-v2 --bucket "$QDRANT_BACKUP_S3_BUCKET" --prefix "$prefix" --delimiter "/" --output json \
+            > "${REPORT_DIR}/s3-prefixes.json"
+          python3 - "${REPORT_DIR}/s3-prefixes.json" "$prefix" > "${REPORT_DIR}/manifest-candidates.tsv" <<'PY'
+          import json, re, sys
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          root = sys.argv[2]
+          pattern = re.compile(r"^" + re.escape(root) + r"(?P<id>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)/$")
+          found = []
+          for item in payload.get("CommonPrefixes", []) or []:
+              m = pattern.fullmatch(item.get("Prefix", ""))
+              if m:
+                  found.append((m.group("id"), f"{item['Prefix']}manifest.json"))
+          for backup_id, key in sorted(found, reverse=True)[:10]:
+              print(f"{backup_id}\t{key}")
+          PY
+          [[ -s "${REPORT_DIR}/manifest-candidates.tsv" ]] || { echo "::error::no backups under s3://${QDRANT_BACKUP_S3_BUCKET}/${prefix}"; exit 1; }
+
+          manifest_args=()
+          while IFS=$'\t' read -r backup_id key; do
+            if aws s3api get-object --bucket "$QDRANT_BACKUP_S3_BUCKET" --key "$key" "${MANIFEST_DIR}/${backup_id}.json" >/dev/null 2>&1; then
+              manifest_args+=(--manifest "${MANIFEST_DIR}/${backup_id}.json")
+            fi
+          done < "${REPORT_DIR}/manifest-candidates.tsv"
+          [[ ${#manifest_args[@]} -gt 0 ]] || { echo "::error::no manifest could be downloaded"; exit 1; }
+
+          collection_args=()
+          [[ -n "$RESTORE_COLLECTION" ]] && collection_args=(--collection "$RESTORE_COLLECTION")
+          resolved="$(python3 scripts/qdrant-latest-restore-preflight.py "${manifest_args[@]}" "${collection_args[@]}" \
+            --output-json "${REPORT_DIR}/latest-preflight.json" --output-md "${REPORT_DIR}/latest-preflight.md")"
+          collection="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["selection"]["selected_collection"])' \
+            "${REPORT_DIR}/latest-preflight.json")"
+          echo "RESTORE_BACKUP_ID=${resolved}" >> "$GITHUB_ENV"
+          echo "RESTORE_COLLECTION=${collection}" >> "$GITHUB_ENV"
+          cat "${REPORT_DIR}/latest-preflight.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download manifest and build the restore plan
+        run: |
+          set -euo pipefail
+          aws s3 cp "s3://${QDRANT_BACKUP_S3_BUCKET}/${QDRANT_BACKUP_S3_PREFIX%/}/${RESTORE_BACKUP_ID}/manifest.json" \
+            "${REPORT_DIR}/manifest.json"
+          args=(plan --manifest "${REPORT_DIR}/manifest.json" --backup-id "$RESTORE_BACKUP_ID"
+                --snapshot-dir "$SNAPSHOT_DIR" --output-json "${REPORT_DIR}/plan.json" --output-md "${REPORT_DIR}/plan.md")
+          [[ -n "$RESTORE_COLLECTION" ]] && args+=(--collection "$RESTORE_COLLECTION")
+          python3 scripts/qdrant-restore-drill.py "${args[@]}"
+          cat "${REPORT_DIR}/plan.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download node snapshots
+        run: |
+          set -euo pipefail
+          python3 - "${REPORT_DIR}/plan.json" > "${REPORT_DIR}/download.tsv" <<'PY'
+          import json, sys
+          plan = json.load(open(sys.argv[1], encoding="utf-8"))
+          for s in plan["snapshots"]:
+              print("\t".join([s["node"], s["s3_key"], s["local_snapshot_path"], str(s["expected_size"])]))
+          PY
+          while IFS=$'\t' read -r node key path size; do
+            install -d -m 0777 "$(dirname "$path")"
+            aws s3 cp "s3://${QDRANT_BACKUP_S3_BUCKET}/${key}" "$path" --only-show-errors
+            chmod 0644 "$path"
+            actual="$(stat -c '%s' "$path")"
+            [[ "$actual" == "$size" ]] || { echo "::error::${node}: size mismatch (expected ${size}, got ${actual})"; exit 1; }
+          done < "${REPORT_DIR}/download.tsv"
+
+      - name: Start a disposable Qdrant cluster
+        run: |
+          set -euo pipefail
+          network="qdrant-drill-${GITHUB_RUN_ID}"
+          echo "DRILL_NETWORK=${network}" >> "$GITHUB_ENV"
+          docker network create "$network" >/dev/null
+          docker pull -q "$RESTORE_IMAGE"
+
+          mapfile -t nodes < <(python3 -c 'import json,sys; [print(n) for n in json.load(open(sys.argv[1]))["nodes"]]' "${REPORT_DIR}/plan.json")
+          : > "${REPORT_DIR}/urls.tsv"
+          index=0
+          for node in "${nodes[@]}"; do
+            index=$((index + 1))
+            hostname="drill-node-${index}"
+            container="qdrant-drill-${GITHUB_RUN_ID}-${index}"
+            port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')"
+            args=(./qdrant --uri "http://${hostname}:6335")
+            [[ "$index" -gt 1 ]] && args=(./qdrant --bootstrap "http://drill-node-1:6335" --uri "http://${hostname}:6335")
+            install -d -m 0777 "${SNAPSHOT_DIR}/${node}" "${STORAGE_DIR}/${node}"
+            docker run -d --name "$container" --hostname "$hostname" --network "$network" \
+              --publish "127.0.0.1:${port}:6333" \
+              --volume "${SNAPSHOT_DIR}/${node}:/qdrant/snapshots" \
+              --volume "${STORAGE_DIR}/${node}:/qdrant/storage" \
+              --env QDRANT__CLUSTER__ENABLED=true \
+              "$RESTORE_IMAGE" "${args[@]}" >/dev/null
+            printf '%s\t%s\t%s\n' "$node" "$container" "http://127.0.0.1:${port}" >> "${REPORT_DIR}/urls.tsv"
+            for _ in $(seq 1 60); do
+              curl -fsS "http://127.0.0.1:${port}/collections" >/dev/null 2>&1 && break
+              sleep 2
+            done
+            curl -fsS "http://127.0.0.1:${port}/collections" >/dev/null
+          done
+
+          first_url="$(head -n1 "${REPORT_DIR}/urls.tsv" | cut -f3)"
+          for _ in $(seq 1 60); do
+            peers="$(curl -fsS "${first_url}/cluster" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["peers"]))')"
+            [[ "$peers" -ge "${#nodes[@]}" ]] && exit 0
+            sleep 2
+          done
+          echo "::error::disposable cluster did not form (${peers} peers)"
+          exit 1
+
+      - name: Restore each node snapshot
+        run: |
+          set -euo pipefail
+          collection="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["collection"])' "${REPORT_DIR}/plan.json")"
+          encoded="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$collection")"
+          python3 - "${REPORT_DIR}/plan.json" "${REPORT_DIR}/urls.tsv" > "${REPORT_DIR}/upload.tsv" <<'PY'
+          import json, sys
+          plan = json.load(open(sys.argv[1], encoding="utf-8"))
+          urls = {l.split("\t")[0]: l.rstrip("\n").split("\t")[2] for l in open(sys.argv[2], encoding="utf-8")}
+          for s in plan["snapshots"]:
+              print("\t".join([s["node"], urls[s["node"]], s["local_snapshot_path"]]))
+          PY
+          while IFS=$'\t' read -r node url path; do
+            status="$(curl -sS --max-time 1800 -o "${REPORT_DIR}/recover-${node}.json" -w '%{http_code}' \
+              -X POST -F "snapshot=@${path}" \
+              "${url}/collections/${encoded}/snapshots/upload?wait=true&priority=snapshot")"
+            echo "${node}: HTTP ${status}"
+            [[ "$status" =~ ^2 ]] || { cat "${REPORT_DIR}/recover-${node}.json"; exit 1; }
+          done < "${REPORT_DIR}/upload.tsv"
+
+      - name: Verify the restored collection
+        run: |
+          set -euo pipefail
+          collection="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["collection"])' "${REPORT_DIR}/plan.json")"
+          url="$(head -n1 "${REPORT_DIR}/urls.tsv" | cut -f3)"
+          for _ in $(seq 1 60); do
+            if python3 scripts/qdrant-restore-drill.py verify --qdrant-url "$url" --collection "$collection" \
+                 --output-json "${REPORT_DIR}/result.json" --output-md "${REPORT_DIR}/result.md"; then
+              cat "${REPORT_DIR}/result.md" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::restore verification did not pass"
+          exit 1
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qdrant-restore-drill-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/qdrant-restore-drill/report/*.md
+            ${{ runner.temp }}/qdrant-restore-drill/report/*.json
+            ${{ runner.temp }}/qdrant-restore-drill/report/*.tsv
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker ps -aq --filter "name=qdrant-drill-${GITHUB_RUN_ID}-" | xargs -r docker rm -f >/dev/null 2>&1 || true
+          [[ -n "${DRILL_NETWORK:-}" ]] && docker network rm "$DRILL_NETWORK" >/dev/null 2>&1 || true
+          sudo rm -rf "${DRILL_DIR:-/nonexistent}"
