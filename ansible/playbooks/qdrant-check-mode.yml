@@ -1,9 +1,0 @@
----
-- name: Render Qdrant configuration in check mode
-  hosts: qdrant
-  become: true
-  gather_facts: false
-  serial: "100%"
-  tags: [qdrant, check]
-  roles:
-    - qdrant

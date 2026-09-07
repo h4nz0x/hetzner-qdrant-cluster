@@ -1,0 +1,15 @@
+---
+profile: production
+
+exclude_paths:
+  - .ansible-facts/
+  - collections/
+  - inventories/*/group_vars/**/vault.yml
+
+skip_list:
+  - no-changed-when              # read-only commands used for verification are intentionally reported as unchanged
+  - var-naming[no-role-prefix]   # qdrant_home, qdrant_image, ... are shared across roles on purpose
+
+warn_list:
+  - experimental
+  - role-name
