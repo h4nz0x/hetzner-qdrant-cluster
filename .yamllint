@@ -21,4 +21,3 @@ rules:
 ignore: |
   ansible/collections/
   terraform/.terraform/
-  terraform/cloud-init/

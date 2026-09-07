@@ -57,7 +57,7 @@ class RepoPolicyTest(unittest.TestCase):
             self.assertRegex(match.group(1), r":v?\d+\.\d+", key)
 
     def test_mutating_workflows_are_manual_and_gated(self) -> None:
-        for name in ("terraform-apply", "ansible-deploy", "qdrant-backup", "qdrant-restore-drill"):
+        for name in ("deploy", "qdrant-backup", "qdrant-restore-drill"):
             workflow = (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
             self.assertIn("workflow_dispatch:", workflow, name)
             self.assertNotIn("schedule:", workflow, name)

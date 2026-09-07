@@ -1,4 +1,5 @@
-# Day-to-day commands. Run `make help` for the list.
+# Day-to-day commands. `make help` lists them. The GitHub "Deploy" workflow
+# runs these same targets, so what works on your laptop works in CI.
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
@@ -6,27 +7,37 @@ TF_DIR      := terraform
 ANSIBLE_DIR := ansible
 INVENTORY   := inventories/production
 VAULT       := $(ANSIBLE_DIR)/$(INVENTORY)/group_vars/all/vault.yml
-VAULT_FLAG  := $(if $(wildcard $(VAULT)),--ask-vault-pass,)
+
+# Locally an encrypted vault prompts for its password. CI writes a plaintext
+# vault from a secret and runs `make ... VAULT_FLAG=`.
+VAULT_FLAG  ?= $(if $(wildcard $(VAULT)),--ask-vault-pass,)
+# CI sets AUTO_APPROVE=1; locally Terraform asks before changing anything.
+TF_APPROVE  := $(if $(AUTO_APPROVE),-auto-approve,)
 export ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/$(ANSIBLE_DIR)/collections
+export TF_IN_AUTOMATION := 1
 
 ## ---- Terraform ----------------------------------------------------------
-init: ## terraform init (local state unless backend_override.tf exists)
+init: ## terraform init (local state unless backend.hcl exists)
 	@test -f $(TF_DIR)/terraform.tfvars || { echo "copy $(TF_DIR)/terraform.tfvars.example to terraform.tfvars first"; exit 1; }
-	@if [ -f $(TF_DIR)/backend.hcl ]; then terraform -chdir=$(TF_DIR) init -input=false -backend-config=backend.hcl; \
-	 else terraform -chdir=$(TF_DIR) init -input=false; fi
+	@if [ -f $(TF_DIR)/backend.hcl ]; then \
+	  cp -n $(TF_DIR)/backend_override.tf.example $(TF_DIR)/backend_override.tf; \
+	  terraform -chdir=$(TF_DIR) init -input=false -backend-config=backend.hcl; \
+	else terraform -chdir=$(TF_DIR) init -input=false; fi
 
 plan: ## show what Terraform would change
-	terraform -chdir=$(TF_DIR) plan -input=false
+	terraform -chdir=$(TF_DIR) plan -input=false -lock-timeout=120s
 
 apply: ## create/update Hetzner resources and write the Ansible inventory
-	terraform -chdir=$(TF_DIR) apply -input=false
+	terraform -chdir=$(TF_DIR) apply -input=false -lock-timeout=120s $(TF_APPROVE)
 
-destroy: ## DESTROY everything Terraform created (asks for confirmation)
-	terraform -chdir=$(TF_DIR) destroy -input=false
+destroy: ## DESTROY everything Terraform created
+	terraform -chdir=$(TF_DIR) destroy -input=false -lock-timeout=120s $(TF_APPROVE)
 
-inventory: ## regenerate ansible inventory from Terraform state without applying
-	terraform -chdir=$(TF_DIR) output -json > /tmp/qdrant-tf-output.json
-	python3 scripts/render-inventory.py --terraform-output /tmp/qdrant-tf-output.json --output $(ANSIBLE_DIR)/$(INVENTORY)/hosts.yml
+inventory: ## regenerate the Ansible inventory from Terraform state without applying
+	@mkdir -p $(ANSIBLE_DIR)/$(INVENTORY)
+	terraform -chdir=$(TF_DIR) output -json > $(ANSIBLE_DIR)/$(INVENTORY)/.tf-output.json
+	python3 scripts/render-inventory.py --terraform-output $(ANSIBLE_DIR)/$(INVENTORY)/.tf-output.json --output $(ANSIBLE_DIR)/$(INVENTORY)/hosts.yml
+	@rm -f $(ANSIBLE_DIR)/$(INVENTORY)/.tf-output.json
 
 ## ---- Ansible ------------------------------------------------------------
 deps: ## install the Ansible collections this repo needs

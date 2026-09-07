@@ -12,7 +12,6 @@ resource "hcloud_server" "node" {
   location     = var.location
   ssh_keys     = [for key in data.hcloud_ssh_key.operator : key.id]
   firewall_ids = [hcloud_firewall.nodes.id]
-  user_data    = file("${path.module}/cloud-init/node.yaml")
 
   public_net {
     ipv4_enabled = true
@@ -36,9 +35,9 @@ resource "hcloud_server" "node" {
   depends_on = [hcloud_network_subnet.nodes]
 
   lifecycle {
-    # Changing the image or user_data would REPLACE a data node. Upgrade the OS
-    # in place with Ansible instead.
-    ignore_changes = [image, user_data, ssh_keys]
+    # Changing the image would REPLACE a data node. Upgrade the OS in place
+    # with Ansible instead.
+    ignore_changes = [image, ssh_keys]
   }
 }
 

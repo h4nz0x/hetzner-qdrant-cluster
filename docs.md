@@ -348,6 +348,8 @@ your first real data lands and whenever you change anything backup-related.
 
 Once the cluster works from your laptop, move the buttons to GitHub so your
 team can plan, apply, deploy and back up with an audit trail and approvals.
+The workflows call the same `make` targets, so nothing behaves differently
+in CI.
 
 ### 13.1 Remote Terraform state
 
@@ -386,8 +388,7 @@ Commit `terraform/terraform.tfvars` to your fork (it has no secrets).
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
 | **CI** | every pull request and push to `main` | lint, tests, `terraform validate`, tflint, trivy. On PRs from the same repo it also posts a `terraform plan` comment. |
-| **Terraform apply** | manual | choose `plan`, `apply` or `destroy`; type `APPLY`/`DESTROY` to confirm; reviewers approve. |
-| **Ansible deploy** | manual | choose a playbook (`site`, `qdrant`, `monitoring`, ...); optional dry run. |
+| **Deploy** | manual | runs the same `make` targets you use locally. Stage `plan` (read-only), `infra` (`make apply`), `configure` (`make inventory deps deploy`, or another `deploy-*`/`check`/`audit` target), `full` (both) or `destroy`. Type `DEPLOY`/`DESTROY` to confirm; reviewers approve. |
 | **Qdrant backup** | manual | runs the systemd backup on the coordinator and shows the summary. |
 | **Qdrant restore drill** | manual | restores the latest (or chosen) backup into a disposable cluster on the runner and verifies it. |
 

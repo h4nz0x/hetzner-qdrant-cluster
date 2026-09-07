@@ -1,0 +1,143 @@
+name: Deploy
+
+# One workflow, same `make` targets you run locally:
+#
+#   plan      make init plan                       (read-only)
+#   infra     make init apply                      (Terraform: servers, network, LBs)
+#   configure make inventory deps deploy           (Ansible: Docker, Qdrant, monitoring, backups)
+#   full      infra, then configure
+#   destroy   make init destroy                    (removes everything Terraform created)
+#
+# Gated by the `production` environment (add required reviewers there) and a
+# typed confirmation for anything that changes infrastructure.
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Stage to run"
+        type: choice
+        required: true
+        default: plan
+        options: [plan, infra, configure, full, destroy]
+      confirmation:
+        description: "Type DEPLOY for infra/configure/full, DESTROY for destroy (empty for plan)"
+        required: false
+        type: string
+        default: ""
+      playbook:
+        description: "For configure/full: which make target to run"
+        type: choice
+        required: false
+        default: deploy
+        options: [deploy, deploy-qdrant, deploy-monitoring, deploy-backup, check, audit]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.9.8"
+  HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
+  AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_KEY }}
+  ANSIBLE_NOCOLOR: "1"
+  ANSIBLE_HOST_KEY_CHECKING: "false"
+  AUTO_APPROVE: "1"
+  VAULT_FLAG: ""
+
+jobs:
+  deploy:
+    name: ${{ inputs.stage }}
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 60
+    steps:
+      - name: Check confirmation
+        env:
+          STAGE: ${{ inputs.stage }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          case "$STAGE" in
+            plan) ;;
+            destroy) [[ "$CONFIRMATION" == "DESTROY" ]] || { echo "::error::type DESTROY to confirm"; exit 1; } ;;
+            *)       [[ "$CONFIRMATION" == "DEPLOY" ]]  || { echo "::error::type DEPLOY to confirm"; exit 1; } ;;
+          esac
+          test -n "$HCLOUD_TOKEN" || { echo "::error::HCLOUD_TOKEN secret is missing"; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible
+        run: pip install "ansible-core>=2.16,<2.20"
+
+      - name: Configure remote state and secrets
+        env:
+          TF_BACKEND_HCL: ${{ secrets.TF_BACKEND_HCL }}
+          ANSIBLE_VAULT_YAML: ${{ secrets.ANSIBLE_VAULT_YAML }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -f terraform/terraform.tfvars || { echo "::error::commit terraform/terraform.tfvars (no secrets in it)"; exit 1; }
+          test -n "$TF_BACKEND_HCL" || { echo "::error::TF_BACKEND_HCL secret is missing (remote state is required in CI)"; exit 1; }
+          printf '%s\n' "$TF_BACKEND_HCL" > terraform/backend.hcl
+
+          if [[ "${{ inputs.stage }}" != "plan" && "${{ inputs.stage }}" != "destroy" ]]; then
+            test -n "$ANSIBLE_VAULT_YAML" || { echo "::error::ANSIBLE_VAULT_YAML secret is missing"; exit 1; }
+            test -n "$SSH_PRIVATE_KEY" || { echo "::error::SSH_PRIVATE_KEY secret is missing"; exit 1; }
+            install -m 0600 /dev/null ansible/inventories/production/group_vars/all/vault.yml
+            printf '%s\n' "$ANSIBLE_VAULT_YAML" > ansible/inventories/production/group_vars/all/vault.yml
+            install -d -m 0700 ~/.ssh
+            printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+            chmod 0600 ~/.ssh/id_ed25519
+          fi
+
+      - name: make init
+        run: make init
+
+      - name: make plan
+        if: inputs.stage == 'plan'
+        run: make plan | tee plan.txt
+
+      - name: make apply
+        if: inputs.stage == 'infra' || inputs.stage == 'full'
+        run: make apply | tee plan.txt
+
+      - name: make destroy
+        if: inputs.stage == 'destroy'
+        run: make destroy | tee plan.txt
+
+      - name: make inventory deps
+        if: inputs.stage == 'configure' || inputs.stage == 'full'
+        run: make inventory deps
+
+      - name: make ${{ inputs.playbook }}
+        if: inputs.stage == 'configure' || inputs.stage == 'full'
+        run: make ${{ inputs.playbook }} | tee ansible.log
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy: ${{ inputs.stage }}"
+            for f in plan.txt ansible.log; do
+              if [[ -f "$f" ]]; then echo; echo "<details><summary>$f</summary>"; echo; echo '```text'; tail -c 60000 "$f"; echo '```'; echo '</details>'; fi
+            done
+            if [[ "${{ inputs.stage }}" == "infra" ]]; then echo; echo "Next: run this workflow again with stage \`configure\`."; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up secrets
+        if: always()
+        run: rm -f ansible/inventories/production/group_vars/all/vault.yml ~/.ssh/id_ed25519 terraform/backend.hcl terraform/backend_override.tf

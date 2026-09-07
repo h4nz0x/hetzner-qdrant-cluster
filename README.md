@@ -13,7 +13,7 @@ One `terraform apply` and one `ansible-playbook` give you:
 - **Prometheus + Alertmanager + Grafana** with a ready-made Qdrant dashboard and alerts
 - **verified S3 snapshot backups** every 12 hours (AWS S3 or Hetzner Object Storage) with retention
 - a **restore drill** workflow that proves a backup is restorable without touching production
-- GitHub Actions for **lint / plan on PR**, and manual, approval-gated **apply / deploy / backup / drill**
+- GitHub Actions for **lint / plan on PR**, and a manual, approval-gated **Deploy** workflow that runs the same `make` targets as your laptop, plus **backup** and **restore drill**
 
 Everything is pinned to exact versions and safe to re-run.
 
@@ -55,8 +55,8 @@ ansible/            Roles: common (Docker, user, volume, secrets), qdrant (compo
 scripts/            Backup, verification and restore helpers installed on the coordinator
                     and used by the workflows. Pure bash + python3, no extra dependencies.
 tests/              Unit tests for the scripts and repository policy checks (run in CI).
-.github/workflows/  ci (lint, test, plan), terraform-apply, ansible-deploy, qdrant-backup,
-                    qdrant-restore-drill.
+.github/workflows/  ci (lint, test, plan on PRs), deploy (make init/apply/deploy, gated),
+                    qdrant-backup, qdrant-restore-drill.
 docs/               Architecture notes and operational runbooks.
 docs.md             Beginner-friendly deployment guide.
 ```
@@ -90,7 +90,7 @@ Full walkthrough with explanations: **[docs.md](docs.md)**.
 
 | Task | How |
 | --- | --- |
-| Change cluster size, server type, volume size | edit `terraform.tfvars`, `make plan apply`, then `make deploy` |
+| Change cluster size, server type, volume size | edit `terraform.tfvars`, `make plan apply`, then `make deploy` (or the Deploy workflow, stage `full`) |
 | Upgrade Qdrant | bump `qdrant_image` in `group_vars/all/all.yml`, `make deploy-qdrant` (rolling, one node at a time) |
 | Run a backup now | `make backup` or the **Qdrant backup** workflow |
 | Prove a backup restores | **Qdrant restore drill** workflow ([runbook](docs/runbooks/restore-drill.md)) |
