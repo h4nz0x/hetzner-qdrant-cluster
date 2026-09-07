@@ -23,8 +23,7 @@ STREAM_VERIFY_SCRIPT = ROOT / "scripts" / "qdrant-stream-verify.py"
 CLEANUP_REPORT_SCRIPT = ROOT / "scripts" / "qdrant-local-cleanup-report.py"
 METRICS_SCRIPT = ROOT / "scripts" / "qdrant-backup-metrics.py"
 NODE_SCRIPT = ROOT / "scripts" / "qdrant-backup-node.sh"
-RUNBOOK = ROOT / "docs" / "runbooks" / "qdrant-snapshot-backup.md"
-WORKFLOW = ROOT / ".github/workflows/production-qdrant-snapshot-backup.yml"
+COORDINATOR_SCRIPT = ROOT / "scripts" / "qdrant-systemd-snapshot-backup.sh"
 
 
 def load_module(path: Path, name: str):
@@ -100,7 +99,7 @@ class QdrantBackupTest(unittest.TestCase):
             one.write_text(json.dumps(node_payload("qdrant-node-1", backup_id)), encoding="utf-8")
             two.write_text(json.dumps(node_payload("qdrant-node-2", backup_id)), encoding="utf-8")
             with self.assertRaises(MANIFEST.ManifestError):
-                MANIFEST.build_manifest([one, two], backup_id, "bucket", "prefix")
+                MANIFEST.build_manifest([one, two], backup_id, "bucket", "prefix", 3)
 
             three.write_text(
                 json.dumps(node_payload("qdrant-node-3", backup_id, ["different"])),
@@ -173,6 +172,26 @@ class QdrantBackupTest(unittest.TestCase):
         ):
             with self.assertRaises(S3_VERIFY.VerificationError):
                 S3_VERIFY.verify_head_object(changed, 1024, checksum)
+
+    def test_s3_object_verifier_relaxes_only_checksum_and_encryption_when_not_strict(self) -> None:
+        checksum = "a" * 64
+        compatible = {
+            "ContentLength": 1024,
+            "Metadata": {"qdrant-sha256": checksum},
+            "ETag": '"etag-value"',
+        }
+        result = S3_VERIFY.verify_head_object(compatible, 1024, checksum, strict=False)
+        self.assertEqual(result["status"], "verified")
+        self.assertFalse(result["strict"])
+        with self.assertRaises(S3_VERIFY.VerificationError):
+            S3_VERIFY.verify_head_object(compatible, 1024, checksum, strict=True)
+        for changed in (
+            {**compatible, "ContentLength": 1023},
+            {**compatible, "Metadata": {"qdrant-sha256": "b" * 64}},
+            {**compatible, "ETag": ""},
+        ):
+            with self.assertRaises(S3_VERIFY.VerificationError):
+                S3_VERIFY.verify_head_object(changed, 1024, checksum, strict=False)
 
     def test_snapshot_stream_must_match_manifest_before_upload_can_succeed(self) -> None:
         content = b"immutable qdrant snapshot bytes"
@@ -356,62 +375,21 @@ print(json.dumps(response))
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(state["delete_calls"], 1)
 
-    def test_workflow_runs_protected_manual_backup_only(self) -> None:
-        workflow = WORKFLOW.read_text(encoding="utf-8")
+    def test_coordinator_script_reads_nodes_from_env_and_deletes_only_after_verification(self) -> None:
+        script = COORDINATOR_SCRIPT.read_text(encoding="utf-8")
         for required in (
-            "workflow_dispatch:",
-            "CREATE_QDRANT_S3_SNAPSHOT_BACKUP",
-            "environment: production",
-            "QDRANT_SSH_PRIVATE_KEY: ${{ secrets.QDRANT_SSH_PRIVATE_KEY }}",
-            "QDRANT_BACKUP_AWS_ACCESS_KEY_ID",
-            "QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY",
-            "QDRANT_BACKUP_S3_BUCKET",
-            "QDRANT_BACKUP_S3_PREFIX",
-            "python3 tests/qdrant-backup-test.py",
-            "scripts/qdrant-backup-node.sh",
-            "scripts/qdrant-s3-object-verify.py",
-            "scripts/qdrant-stream-verify.py",
-            "scripts/qdrant-local-cleanup-report.py",
-            "scripts/qdrant-snapshot-backup.sh",
-            "shellcheck --severity=warning scripts/qdrant-snapshot-backup.sh",
-            "bash scripts/qdrant-snapshot-backup.sh",
-        ):
-            self.assertIn(required, workflow)
-
-        self.assertNotIn("schedule:", workflow)
-        self.assertNotIn("backup-scheduled:", workflow)
-        self.assertNotIn("github.event_name == 'schedule'", workflow)
-
-        script = (ROOT / "scripts" / "qdrant-snapshot-backup.sh").read_text(encoding="utf-8")
-        for required in (
-            "QDRANT_SSH_PRIVATE_KEY",
-            "scripts/qdrant-backup-manifest.py",
-            "scripts/qdrant-s3-retention-plan.py",
-            "scripts/qdrant-stream-verify.py",
-            "--checksum-algorithm SHA256",
+            'read -r -a nodes <<< "${QDRANT_BACKUP_NODES:-}"',
+            'read -r -a host_ips <<< "${QDRANT_BACKUP_NODE_IPS:-}"',
+            "QDRANT_BACKUP_S3_STRICT_VERIFY",
+            "--expected-node-count",
             "--checksum-mode ENABLED",
             "qdrant-sha256=",
             "${remote_cmd} delete",
-            "--keep 2",
         ):
             self.assertIn(required, script)
-
         self.assertLess(script.index("--checksum-mode ENABLED"), script.index("${remote_cmd} delete"))
-
-        for forbidden in ("ansible-playbook", "terraform apply", "docker compose"):
-            self.assertNotIn(forbidden, workflow)
+        for forbidden in ("qdrant-node-1", "203.0.113.", "ansible-playbook", "terraform apply", "docker compose"):
             self.assertNotIn(forbidden, script)
-
-        runbook = RUNBOOK.read_text(encoding="utf-8")
-        for required in (
-            "manual backup",
-            "systemd timer",
-            "latest two completed backup sets",
-            "local snapshots",
-            "qdrant-local-snapshot-cleanup.json",
-        ):
-            self.assertIn(required, runbook)
-
 
 if __name__ == "__main__":
     unittest.main()

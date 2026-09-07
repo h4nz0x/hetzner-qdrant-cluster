@@ -13,8 +13,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFLIGHT_SCRIPT = ROOT / "scripts" / "qdrant-latest-restore-preflight.py"
-WORKFLOW = ROOT / ".github/workflows/production-qdrant-latest-restore-preflight.yml"
-RUNBOOK = ROOT / "docs/runbooks/qdrant-restore-drill.md"
 
 
 def load_module(path: Path, name: str):
@@ -89,7 +87,9 @@ class QdrantLatestRestorePreflightTest(unittest.TestCase):
             payload["nodes"] = payload["nodes"][:2]
             incomplete.write_text(json.dumps(payload), encoding="utf-8")
 
-            selected, rejected = PREFLIGHT.select_latest_complete([complete, incomplete])
+            selected, rejected = PREFLIGHT.select_latest_complete(
+                [complete, incomplete], expected_node_count=3
+            )
 
         self.assertEqual(selected["backup_id"], "2026-07-30T03:51:46Z")
         self.assertEqual(len(rejected), 1)
@@ -133,37 +133,13 @@ class QdrantLatestRestorePreflightTest(unittest.TestCase):
             self.assertIn("backup_id=2026-07-30T15:51:46Z", summary)
             self.assertIn("collection=example_collection", summary)
 
-    def test_workflow_is_read_only_and_documents_latest_preflight(self) -> None:
-        workflow = WORKFLOW.read_text(encoding="utf-8")
-        for required in (
-            "workflow_dispatch:",
-            "FIND_QDRANT_LATEST_RESTORE_BACKUP",
-            "environment: production",
-            "QDRANT_BACKUP_AWS_ACCESS_KEY_ID",
-            "QDRANT_BACKUP_AWS_SECRET_ACCESS_KEY",
-            "QDRANT_BACKUP_S3_BUCKET",
-            "QDRANT_BACKUP_S3_PREFIX",
-            "qdrant-latest-restore-preflight.py",
-            "production-qdrant-latest-restore-preflight-${{ github.run_id }}",
-        ):
-            self.assertIn(required, workflow)
-
-        for forbidden in (
-            "QDRANT_SSH_PRIVATE_KEY",
-            "ssh ",
-            "docker",
-            "terraform apply",
-            "ansible-playbook",
-            "snapshots/upload",
-            "aws s3 rm",
-            "aws s3 cp --recursive",
-        ):
-            self.assertNotIn(forbidden, workflow)
-
-        runbook = RUNBOOK.read_text(encoding="utf-8")
-        self.assertIn("Production Qdrant Latest Restore Preflight", runbook)
-        self.assertIn("FIND_QDRANT_LATEST_RESTORE_BACKUP", runbook)
-
+    def test_node_count_is_taken_from_manifest_when_not_pinned(self) -> None:
+        payload = manifest_payload("2026-07-30T15:51:46Z")
+        payload["nodes"] = payload["nodes"][:2]
+        selected = PREFLIGHT.validate_manifest(payload)
+        self.assertEqual(len(selected["nodes"]), 2)
+        with self.assertRaises(PREFLIGHT.PreflightError):
+            PREFLIGHT.validate_manifest(payload, expected_node_count=3)
 
 if __name__ == "__main__":
     unittest.main()

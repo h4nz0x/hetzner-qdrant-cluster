@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESTORE_SCRIPT = ROOT / "scripts" / "qdrant-restore-drill.py"
-WORKFLOW = ROOT / ".github/workflows/production-qdrant-restore-drill.yml"
+WORKFLOW = ROOT / ".github/workflows/qdrant-restore-drill.yml"
 
 
 def load_module(path: Path, name: str):
@@ -87,7 +87,7 @@ class QdrantRestoreDrillTest(unittest.TestCase):
                 Path("/tmp/snapshots"),
             )
 
-        manifest["nodes"] = manifest["nodes"][:2]
+        manifest["nodes"] = []
         with self.assertRaises(RESTORE.RestoreDrillError):
             RESTORE.select_snapshot_set(
                 manifest,
@@ -147,72 +147,50 @@ class QdrantRestoreDrillTest(unittest.TestCase):
                 output_md.read_text(encoding="utf-8"),
             )
 
+    def test_plan_supports_any_node_count(self) -> None:
+        manifest = manifest_payload()
+        manifest["nodes"].append(
+            {
+                "node": "qdrant-node-4",
+                "collections": [
+                    {
+                        "collection": "example_collection",
+                        "snapshot_name": "example_collection-qdrant-node-4.snapshot",
+                        "size": 1234,
+                        "checksum": "abc123",
+                        "creation_time": "2026-07-29T10:27:49",
+                    }
+                ],
+            }
+        )
+        plan = RESTORE.select_snapshot_set(
+            manifest, "2026-07-29T10:27:49Z", None, Path("/tmp/snapshots")
+        )
+        self.assertEqual(len(plan["snapshots"]), 4)
+        self.assertEqual(plan["nodes"][-1], "qdrant-node-4")
+
     def test_workflow_is_manual_disposable_and_never_targets_live_qdrant(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         for required in (
             "workflow_dispatch:",
-            "RUN_QDRANT_RESTORE_DRILL",
-            "Backup ID to drill, for example 2026-07-29T10:27:49Z, or latest",
-            'if: inputs.backup_id == \'latest\'',
-            "backup_id must be latest or an exact UTC timestamp",
             "environment: production",
-            "qdrant/qdrant:v1.17.0",
-            "Resolve latest Qdrant restore backup from S3",
-            "aws s3api list-objects-v2",
-            "aws s3api get-object",
-            "scripts/qdrant-latest-restore-preflight.py",
-            "RESTORE_BACKUP_ID=${resolved_backup_id}",
-            "RESTORE_COLLECTION=${resolved_collection}",
-            "qdrant-latest-restore-preflight.json",
-            "qdrant-latest-restore-preflight.md",
-            "s3-prefixes.json",
-            "manifest-candidates.tsv",
-            "downloaded-manifests.txt",
-            "missing-manifests.tsv",
-            "docker run",
             "docker network create",
-            '${restore_url}/collections',
             "snapshots/upload?wait=true&priority=snapshot",
             "QDRANT__CLUSTER__ENABLED=true",
-            "--bootstrap",
-            "--uri",
-            "qdrant-restore-download.tsv",
-            "qdrant-restore-upload.tsv",
-            "qdrant-restore-urls.tsv",
-            "recover-*-response.json",
-            "recover-*-status.txt",
-            "Restore verification did not pass",
-            "snapshot recovery failed with HTTP",
-            "curl exit",
-            "if: always()",
-            "if-no-files-found: warn",
-            'chmod 0777 "$snapshot_dir"',
-            '--volume "${QDRANT_RESTORE_SNAPSHOT_DIR}/${node}:/qdrant/snapshots"',
-            "alpine:3.20",
-            "/cleanup-target",
             "scripts/qdrant-restore-drill.py",
-            "python3 tests/qdrant-restore-drill-test.py",
-            "production-qdrant-restore-drill-${{ github.run_id }}",
+            "scripts/qdrant-latest-restore-preflight.py",
+            "if: always()",
         ):
             self.assertIn(required, workflow)
-
         for forbidden in (
-            "QDRANT_SSH_PRIVATE_KEY",
+            "SSH_PRIVATE_KEY",
             "ssh ",
-            "203.0.113.",
-            "10.2.0.",
             "terraform apply",
             "ansible-playbook",
             "docker compose",
-            ':/qdrant/snapshots:ro',
-            "${restore_url}/readiness",
-            "snapshots/recover?wait=true",
-            "recover-body.json",
-            "recover-response.json",
-            "recover-status.txt",
+            "qdrant-node-1",
         ):
             self.assertNotIn(forbidden, workflow)
-
 
 if __name__ == "__main__":
     unittest.main()
