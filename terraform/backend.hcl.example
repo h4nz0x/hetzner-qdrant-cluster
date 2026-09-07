@@ -1,0 +1,8 @@
+# Copy to backend.hcl. Create the bucket first in the Hetzner console
+# (Object Storage) or with any S3 client.
+bucket = "my-terraform-state"
+key    = "qdrant/production.tfstate"
+region = "fsn1"
+endpoints = {
+  s3 = "https://fsn1.your-objectstorage.com"
+}

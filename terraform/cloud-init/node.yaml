@@ -1,0 +1,10 @@
+#cloud-config
+# First-boot setup for a Qdrant node. Keep this minimal: Ansible owns the
+# real configuration and re-running it must be safe.
+package_update: true
+packages:
+  - python3
+  - ca-certificates
+  - curl
+ssh_pwauth: false
+disable_root: false

@@ -1,0 +1,33 @@
+# Copy to terraform.tfvars and adjust. This file must not contain secrets;
+# the Hetzner token comes from the HCLOUD_TOKEN environment variable.
+
+cluster_name = "qdrant"
+environment  = "production"
+
+# Where to run. Location and network_zone must match:
+#   nbg1 / fsn1 / hel1 -> eu-central
+#   ash                -> us-east
+#   hil                -> us-west
+#   sin                -> ap-southeast
+location     = "nbg1"
+network_zone = "eu-central"
+
+node_count     = 3
+server_type    = "ccx23" # cx32 is cheaper for a trial
+volume_size_gb = 100
+
+# Existing SSH key names in your Hetzner project: `hcloud ssh-key list`
+ssh_key_names = ["my-laptop"]
+
+# Who may SSH to the nodes. Use `curl -4 ifconfig.me` to find your IP.
+operator_cidrs = ["203.0.113.5/32"]
+
+# Set a DNS name here only AFTER the first apply, once the record points at
+# the load balancer IP. Leave empty for plain HTTP on port 6333.
+tls_domain = ""
+
+enable_grpc_load_balancer       = true
+enable_monitoring_load_balancer = false
+
+# Turn on once the cluster holds real data.
+delete_protection = false

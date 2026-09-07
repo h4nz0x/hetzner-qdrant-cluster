@@ -1,0 +1,20 @@
+# Remote state in Hetzner Object Storage (S3-compatible).
+#
+# Copy this file to backend_override.tf to switch from local state to remote
+# state. Terraform merges *_override.tf files last, so this replaces the
+# default local backend without editing any other file. CI does this copy
+# automatically. Bucket, key and endpoint come from backend.hcl:
+#
+#   terraform init -backend-config=backend.hcl
+#
+# Credentials come from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+terraform {
+  backend "s3" {
+    use_path_style              = true
+    skip_region_validation      = true
+    skip_credentials_validation = true
+    skip_requesting_account_id  = true
+    skip_metadata_api_check     = true
+    skip_s3_checksum            = true
+  }
+}
