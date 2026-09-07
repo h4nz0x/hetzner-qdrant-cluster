@@ -111,37 +111,53 @@ jobs:
 
   plan:
     name: Terraform plan
-    # Only when the repository has real credentials configured (a fork without
-    # secrets still gets the lint job above).
+    # Read-only plan on pull requests from this repository. It uses REPOSITORY
+    # secrets (not the production environment, whose branch policy would reject
+    # PR branches) and skips itself when HCLOUD_TOKEN is not configured, so a
+    # fresh fork still gets a green CI.
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     needs: lint
     runs-on: ubuntu-latest
-    environment: production
     env:
       HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
       AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_KEY }}
     steps:
+      - name: Check credentials
+        id: creds
+        run: |
+          if [[ -z "$HCLOUD_TOKEN" || -z "${{ secrets.TF_BACKEND_HCL }}" ]]; then
+            echo "::notice::HCLOUD_TOKEN / TF_BACKEND_HCL repository secrets are not set; skipping plan"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v7
+        if: steps.creds.outputs.configured == 'true'
 
       - uses: hashicorp/setup-terraform@v4
+        if: steps.creds.outputs.configured == 'true'
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
       - name: Configure remote state
+        if: steps.creds.outputs.configured == 'true'
         working-directory: terraform
         run: |
           cp backend_override.tf.example backend_override.tf
           printf '%s\n' "${{ secrets.TF_BACKEND_HCL }}" > backend.hcl
 
       - name: Plan
+        if: steps.creds.outputs.configured == 'true'
         working-directory: terraform
         run: |
           terraform init -input=false -backend-config=backend.hcl
           terraform plan -input=false -lock-timeout=120s -no-color -out=tfplan | tee plan.txt
 
       - name: Comment plan on the pull request
+        if: steps.creds.outputs.configured == 'true'
         uses: actions/github-script@v7
         with:
           script: |

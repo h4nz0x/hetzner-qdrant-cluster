@@ -369,7 +369,10 @@ Both files are gitignored; CI recreates them from secrets.
 
 In your repository: **Settings → Environments → New environment** named
 `production`. Add **required reviewers** (yourself is fine). Then add these
-**environment secrets**:
+**environment secrets**. Add `HCLOUD_TOKEN`, `TF_STATE_ACCESS_KEY`,
+`TF_STATE_SECRET_KEY` and `TF_BACKEND_HCL` a second time as **repository
+secrets** if you also want the read-only plan comment on pull requests
+(the environment is reserved for deployments from `main`):
 
 | Secret | Value |
 | --- | --- |
