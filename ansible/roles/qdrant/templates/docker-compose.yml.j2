@@ -1,3 +1,4 @@
+# Managed by Ansible. Node {{ qdrant_node_id }} of {{ qdrant_node_count }}.
 services:
   qdrant_node{{ qdrant_node_id }}:
     image: {{ qdrant_image }}
@@ -8,23 +9,26 @@ services:
     ports:
       - "{{ qdrant_http_port }}:6333" # HTTP
       - "{{ qdrant_grpc_port }}:6334" # gRPC
-      - "{{ qdrant_cluster_port }}:6335" # cluster
+      - "{{ qdrant_cluster_port }}:6335" # cluster (Raft)
     environment:
       QDRANT__CLUSTER__ENABLED: "true"
       QDRANT__LOG_LEVEL: "{{ qdrant_log_level }}"
       QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY is required}"
+{% for key, value in qdrant_extra_env.items() %}
+      {{ key }}: "{{ value }}"
+{% endfor %}
 {% if qdrant_private_ip != qdrant_bootstrap_private_ip %}
     command:
       - ./qdrant
       - --bootstrap
-      - http://{{ qdrant_bootstrap_private_ip }}:6335
+      - http://{{ qdrant_bootstrap_private_ip }}:{{ qdrant_cluster_port }}
       - --uri
-      - http://{{ qdrant_private_ip }}:6335
+      - http://{{ qdrant_private_ip }}:{{ qdrant_cluster_port }}
 {% else %}
     command:
       - ./qdrant
       - --uri
-      - http://{{ qdrant_private_ip }}:6335
+      - http://{{ qdrant_private_ip }}:{{ qdrant_cluster_port }}
 {% endif %}
 
   metrics_proxy:

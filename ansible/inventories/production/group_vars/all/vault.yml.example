@@ -1,11 +1,26 @@
 ---
-# Copy to vault.yml and encrypt before local production use:
-#   ansible-vault encrypt inventories/qdrant-production/group_vars/all/vault.yml
+# Copy to vault.yml, fill in real values, then encrypt it:
+#
+#   cp vault.yml.example vault.yml
+#   ansible-vault encrypt inventories/production/group_vars/all/vault.yml
+#
+# vault.yml is gitignored. In GitHub Actions the whole file is provided as the
+# ANSIBLE_VAULT_YAML secret (plaintext YAML), so keep the same keys.
 
+# Qdrant API key. Every client and the metrics proxy send it as the
+# `api-key` header. Generate one with: openssl rand -hex 32
+vault_qdrant_api_key: "REPLACE-ME"
+
+# Grafana admin login (monitoring host only).
+vault_grafana_admin_user: "admin"
+vault_grafana_admin_password: "REPLACE-ME"
+
+# Optional Slack incoming webhook used by Alertmanager. Leave empty to disable.
+vault_alertmanager_slack_webhook_url: ""
+
+# S3 credentials for snapshot backups (write access to the backup bucket).
 vault_qdrant_backup_aws_access_key_id: "REPLACE-ME"
 vault_qdrant_backup_aws_secret_access_key: "REPLACE-ME"
-vault_qdrant_backup_slack_webhook_url: "REPLACE-ME"
-vault_qdrant_backup_ssh_private_key: |
-  -----BEGIN OPENSSH PRIVATE KEY-----
-  REPLACE-ME
-  -----END OPENSSH PRIVATE KEY-----
+
+# Optional Slack incoming webhook for backup started/succeeded/failed messages.
+vault_qdrant_backup_slack_webhook_url: ""

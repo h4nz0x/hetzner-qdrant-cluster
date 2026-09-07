@@ -1,0 +1,14 @@
+---
+qdrant_home: /home/qdrant
+qdrant_env_file: /etc/qdrant/cluster.env
+qdrant_monitoring_dir: "{{ qdrant_home }}/monitoring"
+prometheus_image: prom/prometheus:v2.55.1
+alertmanager_image: prom/alertmanager:v0.28.1
+grafana_image: grafana/grafana:11.6.1
+prometheus_retention: 30d
+prometheus_scrape_interval: 15s
+qdrant_metrics_port: 6336
+alertmanager_slack_channel: "#qdrant-alerts"
+# Alert thresholds
+qdrant_alert_backup_max_age_hours: 26
+qdrant_alert_disk_used_percent: 85

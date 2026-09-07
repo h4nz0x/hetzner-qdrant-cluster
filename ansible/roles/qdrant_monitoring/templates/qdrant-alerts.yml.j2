@@ -1,0 +1,86 @@
+# Managed by Ansible.
+groups:
+  - name: qdrant-cluster
+    rules:
+      - alert: QdrantNodeDown
+        expr: up{job="qdrant"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Qdrant node {{ '{{ $labels.instance }}' }} is not responding"
+          description: "Prometheus cannot scrape the Qdrant metrics endpoint for 2 minutes."
+
+      - alert: QdrantClusterPeersBelowExpected
+        expr: min(qdrant_cluster_peers_total) < {{ groups['qdrant'] | length }}
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Qdrant cluster has fewer peers than expected"
+          description: "Expected {{ groups['qdrant'] | length }} peers, a node reports {{ '{{ $value }}' }}."
+
+      - alert: QdrantRaftLeaderChanged
+        expr: changes(qdrant_cluster_term[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qdrant Raft leader election happened"
+          description: "The Raft term changed within the last 10 minutes."
+
+      - alert: QdrantRaftCommitStalled
+        expr: increase(qdrant_cluster_commit[10m]) == 0 and on() min(qdrant_cluster_peers_total) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qdrant Raft commit index is not advancing"
+          description: "No Raft commits for 10 minutes. Check cluster health and the private network."
+
+  - name: qdrant-host
+    rules:
+      - alert: QdrantDataVolumeAlmostFull
+        expr: >-
+          100 * (1 - node_filesystem_avail_bytes{mountpoint=~"/mnt/HC_Volume_.*"}
+          / node_filesystem_size_bytes{mountpoint=~"/mnt/HC_Volume_.*"}) > {{ qdrant_alert_disk_used_percent }}
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qdrant data volume above {{ qdrant_alert_disk_used_percent }}% on {{ '{{ $labels.instance }}' }}"
+          description: "Resize the Hetzner volume (volume_size_gb in Terraform) before it fills up."
+
+      - alert: QdrantNodeExporterDown
+        expr: up{job="node"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "node_exporter unreachable on {{ '{{ $labels.instance }}' }}"
+
+  - name: qdrant-backup
+    rules:
+      - alert: QdrantBackupFailed
+        expr: qdrant_backup_last_success == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Latest Qdrant backup is not valid"
+          description: "The latest manifest on the coordinator is missing or failed validation. Check `journalctl -u qdrant-backup`."
+
+      - alert: QdrantBackupStale
+        expr: (time() - qdrant_backup_last_success_timestamp_seconds) > {{ qdrant_alert_backup_max_age_hours }} * 3600
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No successful Qdrant backup in {{ qdrant_alert_backup_max_age_hours }} hours"
+
+      - alert: QdrantBackupLocalSnapshotsRemaining
+        expr: qdrant_backup_local_snapshots_remaining > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Local snapshots were not cleaned up after the last backup"

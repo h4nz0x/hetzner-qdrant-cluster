@@ -1,0 +1,7 @@
+---
+- name: Prepare every node (Docker, qdrant user, data volume, secrets file)
+  hosts: qdrant
+  become: true
+  tags: [bootstrap]
+  roles:
+    - common

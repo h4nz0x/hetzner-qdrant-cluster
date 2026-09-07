@@ -2,7 +2,7 @@
 qdrant_home: /home/qdrant
 qdrant_env_file: /etc/qdrant/cluster.env
 qdrant_image: qdrant/qdrant:v1.17.0
-qdrant_metrics_proxy_image: nginx:1.25-alpine
+qdrant_metrics_proxy_image: nginx:1.27-alpine
 qdrant_log_level: INFO
 qdrant_http_port: 6333
 qdrant_grpc_port: 6334
@@ -10,3 +10,7 @@ qdrant_cluster_port: 6335
 qdrant_metrics_port: 6336
 qdrant_compose_dir: "{{ qdrant_home }}/qdrant-node{{ qdrant_node_id }}"
 qdrant_metrics_proxy_dir: "{{ qdrant_compose_dir }}/metrics-proxy"
+# Extra QDRANT__* environment variables merged into the container, e.g.
+#   qdrant_extra_env:
+#     QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS: "4"
+qdrant_extra_env: {}

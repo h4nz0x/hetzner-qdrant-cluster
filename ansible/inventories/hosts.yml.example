@@ -1,0 +1,42 @@
+---
+# Terraform generates inventories/production/hosts.yml in this shape.
+# This example exists only so you can see what it looks like; run
+# `make inventory` to create the real one from Terraform state.
+all:
+  vars:
+    ansible_user: root
+    qdrant_cluster_name: qdrant
+    qdrant_environment: production
+    qdrant_node_count: 3
+    qdrant_bootstrap_private_ip: 10.2.0.11
+    qdrant_private_network_cidr: 10.2.0.0/16
+    qdrant_http_lb_public_ip: "198.51.100.10"
+    qdrant_grpc_lb_public_ip: "198.51.100.11"
+    qdrant_monitoring_lb_public_ip: ""
+  children:
+    qdrant:
+      hosts:
+        qdrant-node-1:
+          ansible_host: 203.0.113.11
+          qdrant_node_id: 1
+          qdrant_private_ip: 10.2.0.11
+          qdrant_data_dir: /mnt/HC_Volume_100000001/qdrant
+        qdrant-node-2:
+          ansible_host: 203.0.113.12
+          qdrant_node_id: 2
+          qdrant_private_ip: 10.2.0.12
+          qdrant_data_dir: /mnt/HC_Volume_100000002/qdrant
+        qdrant-node-3:
+          ansible_host: 203.0.113.13
+          qdrant_node_id: 3
+          qdrant_private_ip: 10.2.0.13
+          qdrant_data_dir: /mnt/HC_Volume_100000003/qdrant
+    qdrant_bootstrap:
+      hosts:
+        qdrant-node-1: {}
+    qdrant_monitoring:
+      hosts:
+        qdrant-node-1: {}
+    qdrant_backup_coordinator:
+      hosts:
+        qdrant-node-1: {}

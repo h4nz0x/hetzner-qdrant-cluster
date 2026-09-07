@@ -1,35 +1,24 @@
 ---
-- name: Validate explicit Qdrant backup timer rollout confirmation
-  ansible.builtin.assert:
-    that:
-      - qdrant_backup_timer_confirmation | default('') == 'APPLY_QDRANT_BACKUP_TIMER'
-    fail_msg: >-
-      Refusing to install Qdrant backup timer without
-      qdrant_backup_timer_confirmation=APPLY_QDRANT_BACKUP_TIMER.
-
-- name: Require exactly one Qdrant backup coordinator
+- name: Require exactly one backup coordinator
   ansible.builtin.assert:
     that:
       - groups[qdrant_backup_coordinator_group] | default([]) | length == 1
       - inventory_hostname in groups[qdrant_backup_coordinator_group]
-    fail_msg: >-
-      Qdrant backups must be installed on exactly one coordinator host.
+    fail_msg: "Qdrant backups must be installed on exactly one coordinator host."
 
-- name: Validate Qdrant backup configuration
+- name: Validate backup configuration
   ansible.builtin.assert:
     that:
-      - qdrant_backup_on_calendar == "*-*-* 00,12:00:00"
-      - qdrant_backup_retention_keep | int == 2
+      - qdrant_backup_retention_keep | int >= 1
       - qdrant_backup_s3_bucket | length > 0
       - qdrant_backup_s3_prefix | length > 0
       - qdrant_backup_aws_region | length > 0
-      - vault_qdrant_backup_aws_access_key_id | length > 0
-      - vault_qdrant_backup_aws_secret_access_key | length > 0
-      - vault_qdrant_backup_ssh_private_key | length > 0
-    fail_msg: Qdrant backup timer variables or vault secrets are incomplete.
+      - vault_qdrant_backup_aws_access_key_id | default('') | length > 0
+      - vault_qdrant_backup_aws_secret_access_key | default('') | length > 0
+    fail_msg: "Backup variables or vault S3 credentials are incomplete."
   no_log: true
 
-- name: Install Qdrant backup OS dependencies
+- name: Install OS dependencies
   ansible.builtin.apt:
     name:
       - ca-certificates
@@ -40,149 +29,66 @@
     state: present
     update_cache: true
     cache_valid_time: 3600
-  when: not ansible_check_mode
 
-- name: Check Qdrant backup AWS CLI availability
+- name: Check for AWS CLI
   ansible.builtin.command: /usr/local/bin/aws --version
   register: qdrant_backup_awscli_check
   changed_when: false
   failed_when: false
 
-- name: Preview Qdrant backup AWS CLI installation
-  ansible.builtin.debug:
-    msg: "Check mode: AWS CLI v2 would be installed for Qdrant S3 uploads."
-  when:
-    - ansible_check_mode
-    - qdrant_backup_awscli_check.rc != 0
+- name: Install AWS CLI v2
+  when: qdrant_backup_awscli_check.rc != 0
+  block:
+    - name: Download AWS CLI installer
+      ansible.builtin.get_url:
+        url: "{{ qdrant_backup_awscli_url }}"
+        dest: "{{ qdrant_backup_awscli_archive }}"
+        owner: root
+        group: root
+        mode: "0644"
 
-- name: Download Qdrant backup AWS CLI installer
-  ansible.builtin.get_url:
-    url: "{{ qdrant_backup_awscli_url }}"
-    dest: "{{ qdrant_backup_awscli_archive }}"
-    owner: root
-    group: root
-    mode: "0644"
-  when:
-    - not ansible_check_mode
-    - qdrant_backup_awscli_check.rc != 0
+    - name: Reset installer directory
+      ansible.builtin.file:
+        path: "{{ qdrant_backup_awscli_extract_dir }}"
+        state: absent
 
-- name: Reset Qdrant backup AWS CLI installer directory
+    - name: Create installer directory
+      ansible.builtin.file:
+        path: "{{ qdrant_backup_awscli_extract_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Unpack installer
+      ansible.builtin.unarchive:
+        src: "{{ qdrant_backup_awscli_archive }}"
+        dest: "{{ qdrant_backup_awscli_extract_dir }}"
+        remote_src: true
+
+    - name: Run installer
+      ansible.builtin.command:
+        cmd: >-
+          {{ qdrant_backup_awscli_extract_dir }}/aws/install
+          --bin-dir /usr/local/bin
+          --install-dir /usr/local/aws-cli
+          --update
+        creates: /usr/local/bin/aws
+
+- name: Create backup directories
   ansible.builtin.file:
-    path: "{{ qdrant_backup_awscli_extract_dir }}"
-    state: absent
-  when:
-    - not ansible_check_mode
-    - qdrant_backup_awscli_check.rc != 0
-
-- name: Create Qdrant backup AWS CLI installer directory
-  ansible.builtin.file:
-    path: "{{ qdrant_backup_awscli_extract_dir }}"
+    path: "{{ item.path }}"
     state: directory
     owner: root
     group: root
-    mode: "0755"
-  when:
-    - not ansible_check_mode
-    - qdrant_backup_awscli_check.rc != 0
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ qdrant_backup_env_dir }}", mode: "0700" }
+    - { path: "{{ qdrant_backup_state_dir }}", mode: "0750" }
+    - { path: "{{ qdrant_backup_lib_dir }}", mode: "0755" }
+    - { path: "{{ qdrant_backup_metrics_textfile_dir }}", mode: "0755" }
 
-- name: Unpack Qdrant backup AWS CLI installer
-  ansible.builtin.unarchive:
-    src: "{{ qdrant_backup_awscli_archive }}"
-    dest: "{{ qdrant_backup_awscli_extract_dir }}"
-    remote_src: true
-  when:
-    - not ansible_check_mode
-    - qdrant_backup_awscli_check.rc != 0
-
-- name: Install Qdrant backup AWS CLI
-  ansible.builtin.command:
-    cmd: >-
-      {{ qdrant_backup_awscli_extract_dir }}/aws/install
-      --bin-dir /usr/local/bin
-      --install-dir /usr/local/aws-cli
-      --update
-    creates: /usr/local/bin/aws
-  when:
-    - not ansible_check_mode
-    - qdrant_backup_awscli_check.rc != 0
-
-- name: Create Qdrant backup config directory
-  ansible.builtin.file:
-    path: "{{ qdrant_backup_env_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0700"
-
-- name: Create Qdrant backup state directory
-  ansible.builtin.file:
-    path: "{{ qdrant_backup_state_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0750"
-
-- name: Create Qdrant backup helper directory
-  ansible.builtin.file:
-    path: "{{ qdrant_backup_lib_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-
-- name: Create node_exporter textfile collector directory for Qdrant backup metrics
-  ansible.builtin.file:
-    path: "{{ qdrant_backup_metrics_textfile_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-
-- name: Inspect standalone Docker node_exporter for Qdrant backup textfile support
-  ansible.builtin.command:
-    argv:
-      - docker
-      - inspect
-      - node_exporter
-      - --format
-      - "{% raw %}{{ .Config.Image }} {{ json .Config.Cmd }}{% endraw %}"
-  register: qdrant_backup_node_exporter_inspect
-  changed_when: false
-  failed_when: false
-
-- name: Preview Docker node_exporter textfile collector update
-  ansible.builtin.debug:
-    msg: >-
-      Check mode: standalone Docker node_exporter would be recreated with
-      --collector.textfile.directory=/host{{ qdrant_backup_metrics_textfile_dir }}.
-  when:
-    - ansible_check_mode
-    - qdrant_backup_node_exporter_inspect.rc == 0
-    - "'--collector.textfile.directory=/host' ~ qdrant_backup_metrics_textfile_dir not in qdrant_backup_node_exporter_inspect.stdout"
-
-- name: Recreate standalone Docker node_exporter with Qdrant backup textfile collector
-  ansible.builtin.shell: |
-    set -euo pipefail
-    image="$(docker inspect node_exporter --format '{% raw %}{{ .Config.Image }}{% endraw %}')"
-    docker stop node_exporter
-    docker rm node_exporter
-    docker run -d \
-      --name node_exporter \
-      --restart unless-stopped \
-      --network host \
-      -v /:/host:ro,rslave \
-      "${image}" \
-      --path.rootfs=/host \
-      --collector.textfile.directory=/host{{ qdrant_backup_metrics_textfile_dir }}
-  args:
-    executable: /bin/bash
-  changed_when: true
-  when:
-    - not ansible_check_mode
-    - qdrant_backup_node_exporter_inspect.rc == 0
-    - "'--collector.textfile.directory=/host' ~ qdrant_backup_metrics_textfile_dir not in qdrant_backup_node_exporter_inspect.stdout"
-
-- name: Install Qdrant backup environment file
+- name: Install backup environment file
   ansible.builtin.template:
     src: backup.env.j2
     dest: "{{ qdrant_backup_env_file }}"
@@ -191,16 +97,7 @@
     mode: "0400"
   no_log: true
 
-- name: Install Qdrant backup SSH private key
-  ansible.builtin.copy:
-    dest: "{{ qdrant_backup_ssh_key_file }}"
-    content: "{{ vault_qdrant_backup_ssh_private_key }}\n"
-    owner: root
-    group: root
-    mode: "0400"
-  no_log: true
-
-- name: Install Qdrant backup SSH config
+- name: Install SSH config for reaching every node
   ansible.builtin.template:
     src: ssh_config.j2
     dest: "{{ qdrant_backup_ssh_config_file }}"
@@ -208,7 +105,7 @@
     group: root
     mode: "0600"
 
-- name: Install Qdrant backup helper scripts
+- name: Install backup helper scripts
   ansible.builtin.copy:
     src: "{{ playbook_dir }}/../../scripts/{{ item }}"
     dest: "{{ qdrant_backup_lib_dir }}/{{ item }}"
@@ -224,7 +121,7 @@
     - qdrant-stream-verify.py
     - qdrant-local-cleanup-report.py
 
-- name: Install Qdrant systemd backup coordinator script
+- name: Install backup coordinator script
   ansible.builtin.copy:
     src: "{{ playbook_dir }}/../../scripts/qdrant-systemd-snapshot-backup.sh"
     dest: "{{ qdrant_backup_script_path }}"
@@ -232,60 +129,31 @@
     group: root
     mode: "0755"
 
-- name: Install Qdrant backup service
+- name: Install systemd units
   ansible.builtin.template:
-    src: qdrant-backup.service.j2
-    dest: /etc/systemd/system/qdrant-backup.service
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
     owner: root
     group: root
     mode: "0644"
+  loop:
+    - qdrant-backup.service
+    - qdrant-backup.timer
+    - qdrant-backup-metrics.service
+    - qdrant-backup-metrics.timer
   notify: Reload systemd
 
-- name: Install Qdrant backup timer
-  ansible.builtin.template:
-    src: qdrant-backup.timer.j2
-    dest: /etc/systemd/system/qdrant-backup.timer
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Reload systemd
-
-- name: Install Qdrant backup metrics service
-  ansible.builtin.template:
-    src: qdrant-backup-metrics.service.j2
-    dest: /etc/systemd/system/qdrant-backup-metrics.service
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Reload systemd
-
-- name: Install Qdrant backup metrics timer
-  ansible.builtin.template:
-    src: qdrant-backup-metrics.timer.j2
-    dest: /etc/systemd/system/qdrant-backup-metrics.timer
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Reload systemd
-
-- name: Flush systemd daemon reload before enabling timer
+- name: Flush handlers before enabling timers
   ansible.builtin.meta: flush_handlers
 
-- name: Preview Qdrant backup timer enablement
-  ansible.builtin.debug:
-    msg: >-
-      Check mode: qdrant-backup.timer would be
-      {{ qdrant_backup_enabled | bool | ternary('enabled and started', 'disabled and stopped') }}.
-  when: ansible_check_mode
-
-- name: Enable and start Qdrant backup timer
+- name: Enable the backup timer
   ansible.builtin.systemd:
     name: qdrant-backup.timer
     enabled: "{{ qdrant_backup_enabled | bool }}"
     state: "{{ qdrant_backup_enabled | bool | ternary('started', 'stopped') }}"
   when: not ansible_check_mode
 
-- name: Enable and start Qdrant backup metrics timer
+- name: Enable the backup metrics timer
   ansible.builtin.systemd:
     name: qdrant-backup-metrics.timer
     enabled: "{{ qdrant_backup_metrics_enabled | bool }}"

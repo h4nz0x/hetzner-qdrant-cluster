@@ -1,13 +1,14 @@
+# Managed by Ansible. Lets Prometheus scrape /metrics without the API key.
 server {
   listen 6336;
 
-  location /metrics {
+  location = /metrics {
     proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header api-key ${QDRANT_API_KEY};
-
     proxy_pass http://${QDRANT_UPSTREAM}/metrics;
+  }
+
+  location / {
+    return 404;
   }
 }

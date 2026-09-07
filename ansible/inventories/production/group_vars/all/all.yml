@@ -1,7 +1,37 @@
 ---
-qdrant_backup_s3_bucket: qdrant-backups-example
+# Non-secret cluster configuration. Secrets live in vault.yml (see
+# vault.yml.example). Everything here is safe to commit.
+
+# ---- Qdrant -------------------------------------------------------------
+qdrant_image: qdrant/qdrant:v1.17.0
+qdrant_log_level: INFO
+qdrant_home: /home/qdrant
+qdrant_env_file: /etc/qdrant/cluster.env
+
+# Metrics proxy: nginx in front of /metrics so Prometheus never needs the
+# Qdrant API key.
+qdrant_metrics_proxy_image: nginx:1.27-alpine
+
+# ---- Monitoring (runs on the qdrant_monitoring host) --------------------
+qdrant_monitoring_enabled: true
+prometheus_image: prom/prometheus:v2.55.1
+alertmanager_image: prom/alertmanager:v0.28.1
+grafana_image: grafana/grafana:11.6.1
+node_exporter_image: prom/node-exporter:v1.9.1
+prometheus_retention: 30d
+alertmanager_slack_channel: "#qdrant-alerts"
+
+# ---- Backups (runs on the qdrant_backup_coordinator host) ---------------
+# Snapshots of every collection on every node are streamed to S3 twice a
+# day, verified, and the latest N complete backup sets are retained.
+qdrant_backup_enabled: true
+qdrant_backup_s3_bucket: my-qdrant-backups
 qdrant_backup_s3_prefix: production
-qdrant_backup_aws_region: us-west-2
+qdrant_backup_aws_region: eu-central-1
+# Leave empty for AWS S3. For Hetzner Object Storage use, for example:
+#   https://fsn1.your-objectstorage.com
+qdrant_backup_s3_endpoint_url: ""
 qdrant_backup_on_calendar: "*-*-* 00,12:00:00"
 qdrant_backup_randomized_delay_sec: 900
 qdrant_backup_retention_keep: 2
+qdrant_backup_slack_channel: "#qdrant-alerts"

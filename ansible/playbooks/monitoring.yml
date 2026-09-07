@@ -1,0 +1,8 @@
+---
+- name: Deploy Prometheus, Alertmanager and Grafana on the monitoring node
+  hosts: qdrant_monitoring
+  become: true
+  tags: [monitoring]
+  roles:
+    - role: qdrant_monitoring
+      when: qdrant_monitoring_enabled | bool

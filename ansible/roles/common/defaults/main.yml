@@ -1,0 +1,6 @@
+---
+qdrant_home: /home/qdrant
+qdrant_env_file: /etc/qdrant/cluster.env
+node_exporter_image: prom/node-exporter:v1.9.1
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile
+docker_apt_release: "{{ ansible_distribution_release }}"

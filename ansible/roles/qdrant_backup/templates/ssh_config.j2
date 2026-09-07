@@ -1,7 +1,9 @@
+# Managed by Ansible. The coordinator reaches every node over the private
+# network with its own key.
 {% for host in groups['qdrant'] %}
 Host {{ host }}
-  HostName {{ hostvars[host].ansible_host }}
-  User {{ hostvars[host].ansible_user | default('root') }}
+  HostName {{ hostvars[host].qdrant_private_ip }}
+  User root
   IdentityFile {{ qdrant_backup_ssh_key_file }}
   IdentitiesOnly yes
   StrictHostKeyChecking yes

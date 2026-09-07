@@ -1,0 +1,43 @@
+---
+# The bootstrap node must be up before peers can join it, so it is deployed
+# first. Peers then join one at a time so a bad image never takes down more
+# than one node at once.
+- name: Deploy Qdrant on the bootstrap node
+  hosts: qdrant_bootstrap
+  become: true
+  tags: [qdrant]
+  roles:
+    - qdrant
+
+- name: Deploy Qdrant on the remaining nodes, one at a time
+  hosts: qdrant:!qdrant_bootstrap
+  become: true
+  serial: 1
+  tags: [qdrant]
+  roles:
+    - qdrant
+
+- name: Verify the cluster from the bootstrap node
+  hosts: qdrant_bootstrap
+  become: true
+  tags: [qdrant, verify]
+  tasks:
+    - name: Read cluster status
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:6333/cluster"
+        headers:
+          api-key: "{{ vault_qdrant_api_key }}"
+        return_content: true
+      register: qdrant_cluster
+      retries: 30
+      delay: 5
+      until: >-
+        qdrant_cluster.status == 200 and
+        (qdrant_cluster.json.result.peers | length) >= (qdrant_node_count | int)
+      no_log: true
+
+    - name: Show cluster membership
+      ansible.builtin.debug:
+        msg: >-
+          Qdrant cluster is up with {{ qdrant_cluster.json.result.peers | length }} peers
+          (expected {{ qdrant_node_count }}). Raft leader: {{ qdrant_cluster.json.result.raft_info.leader }}.

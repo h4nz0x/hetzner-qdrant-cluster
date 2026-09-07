@@ -1,0 +1,90 @@
+---
+- name: Create monitoring directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: qdrant
+    group: qdrant
+    mode: "0755"
+  loop:
+    - "{{ qdrant_monitoring_dir }}"
+    - "{{ qdrant_monitoring_dir }}/prometheus"
+    - "{{ qdrant_monitoring_dir }}/alertmanager"
+    - "{{ qdrant_monitoring_dir }}/grafana/provisioning/datasources"
+    - "{{ qdrant_monitoring_dir }}/grafana/provisioning/dashboards"
+    - "{{ qdrant_monitoring_dir }}/grafana/dashboards"
+
+- name: Render Prometheus configuration
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: "{{ qdrant_monitoring_dir }}/prometheus/prometheus.yml"
+    owner: qdrant
+    group: qdrant
+    mode: "0644"
+  notify: Reload prometheus
+
+- name: Render alert rules
+  ansible.builtin.template:
+    src: qdrant-alerts.yml.j2
+    dest: "{{ qdrant_monitoring_dir }}/prometheus/qdrant-alerts.yml"
+    owner: qdrant
+    group: qdrant
+    mode: "0644"
+  notify: Reload prometheus
+
+- name: Render Alertmanager configuration
+  ansible.builtin.template:
+    src: alertmanager.yml.j2
+    dest: "{{ qdrant_monitoring_dir }}/alertmanager/alertmanager.yml"
+    owner: qdrant
+    group: qdrant
+    mode: "0640"
+  no_log: true
+  notify: Reload alertmanager
+
+- name: Render Grafana provisioning
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ qdrant_monitoring_dir }}/grafana/provisioning/{{ item.dest }}"
+    owner: qdrant
+    group: qdrant
+    mode: "0644"
+  loop:
+    - { src: grafana-datasource.yml.j2, dest: datasources/prometheus.yml }
+    - { src: grafana-dashboards.yml.j2, dest: dashboards/dashboards.yml }
+
+- name: Install Qdrant Grafana dashboard
+  ansible.builtin.copy:
+    src: grafana-dashboard.json
+    dest: "{{ qdrant_monitoring_dir }}/grafana/dashboards/qdrant.json"
+    owner: qdrant
+    group: qdrant
+    mode: "0644"
+
+- name: Render monitoring compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ qdrant_monitoring_dir }}/docker-compose.yml"
+    owner: qdrant
+    group: qdrant
+    mode: "0644"
+
+- name: Start or update the monitoring stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ qdrant_monitoring_dir }}"
+    env_files:
+      - "{{ qdrant_env_file }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+  when: not ansible_check_mode
+
+- name: Wait for Grafana
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:3000/api/health"
+    status_code: 200
+  register: grafana_health
+  retries: 24
+  delay: 5
+  until: grafana_health.status == 200
+  when: not ansible_check_mode

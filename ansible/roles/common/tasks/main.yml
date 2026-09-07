@@ -1,0 +1,102 @@
+---
+- name: Validate inventory values for this node
+  ansible.builtin.assert:
+    that:
+      - qdrant_node_id | int >= 1
+      - qdrant_private_ip is match('^[0-9]+([.][0-9]+){3}$')
+      - qdrant_bootstrap_private_ip is match('^[0-9]+([.][0-9]+){3}$')
+      - qdrant_data_dir is match('^/mnt/HC_Volume_[0-9]+/qdrant$')
+      - vault_qdrant_api_key is defined
+      - vault_qdrant_api_key | length >= 16
+    fail_msg: >-
+      Inventory or vault values are incomplete. Run `make inventory` and make
+      sure vault.yml defines vault_qdrant_api_key (at least 16 characters).
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - jq
+      - python3
+      - unattended-upgrades
+      - unzip
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install Docker
+  ansible.builtin.import_tasks: docker.yml
+
+- name: Create qdrant system user
+  ansible.builtin.user:
+    name: qdrant
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ qdrant_home }}"
+    create_home: true
+    groups: docker
+    append: true
+
+- name: Ensure the data volume is mounted
+  ansible.builtin.command:
+    argv: [mountpoint, -q, "{{ qdrant_data_dir | dirname }}"]
+  register: qdrant_volume_mount
+  changed_when: false
+  failed_when: false
+
+- name: Refuse to continue without the data volume
+  ansible.builtin.assert:
+    that: qdrant_volume_mount.rc == 0
+    fail_msg: >-
+      {{ qdrant_data_dir | dirname }} is not a mount point. The Hetzner volume
+      should be auto-mounted there; check `lsblk` and `cat /etc/fstab` on the node.
+
+- name: Create Qdrant storage directory on the volume
+  ansible.builtin.file:
+    path: "{{ qdrant_data_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create /etc/qdrant
+  ansible.builtin.file:
+    path: "{{ qdrant_env_file | dirname }}"
+    state: directory
+    owner: root
+    group: qdrant
+    mode: "0750"
+
+- name: Write cluster secrets file
+  ansible.builtin.template:
+    src: cluster.env.j2
+    dest: "{{ qdrant_env_file }}"
+    owner: root
+    group: qdrant
+    mode: "0640"
+  no_log: true
+
+- name: Create node_exporter textfile directory
+  ansible.builtin.file:
+    path: "{{ node_exporter_textfile_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Run node_exporter
+  community.docker.docker_container:
+    name: node_exporter
+    image: "{{ node_exporter_image }}"
+    restart_policy: unless-stopped
+    network_mode: host
+    pid_mode: host
+    volumes:
+      - "/:/host:ro,rslave"
+    command:
+      - "--path.rootfs=/host"
+      - "--collector.textfile.directory=/host{{ node_exporter_textfile_dir }}"
+    state: started

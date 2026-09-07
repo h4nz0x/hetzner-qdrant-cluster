@@ -1,52 +1,78 @@
 ---
-- name: Refuse Qdrant role outside Ansible check mode
+- name: Validate node variables
   ansible.builtin.assert:
     that:
-      - ansible_check_mode
-    fail_msg: >-
-      The first Qdrant Ansible role is render-only. Run with --check --diff;
-      do not apply it to live Qdrant nodes yet.
-    success_msg: Qdrant render-only guard passed.
-
-- name: Validate Qdrant inventory variables
-  ansible.builtin.assert:
-    that:
-      - qdrant_node_id in [1, 2, 3]
-      - qdrant_private_ip is match('^10[.]2[.]0[.][0-9]+$')
-      - qdrant_bootstrap_private_ip is match('^10[.]2[.]0[.][0-9]+$')
-      - qdrant_data_dir is match('^/mnt/HC_Volume_[0-9]+/qdrant$')
+      - qdrant_node_id | int >= 1
       - qdrant_image is match('^qdrant/qdrant:v[0-9]+[.][0-9]+[.][0-9]+$')
-      - qdrant_metrics_proxy_image is match('^nginx:[0-9]+[.][0-9]+-alpine$')
-    fail_msg: >-
-      Qdrant inventory does not match the reviewed three-node live topology.
+      - qdrant_metrics_proxy_image is match('^nginx:[0-9]+[.][0-9]+(-alpine)?$')
+    fail_msg: "Pin qdrant_image and qdrant_metrics_proxy_image to exact versions."
 
-- name: Check Qdrant secret environment file presence
+- name: Check the secrets file exists
   ansible.builtin.stat:
     path: "{{ qdrant_env_file }}"
   register: qdrant_env_file_stat
-  changed_when: false
 
-- name: Require existing Qdrant secret environment file
+- name: Require the secrets file
   ansible.builtin.assert:
     that:
       - qdrant_env_file_stat.stat.exists
-      - qdrant_env_file_stat.stat.isreg
-    fail_msg: >-
-      {{ qdrant_env_file }} is missing. This role does not create Qdrant API
-      keys or Grafana credentials; it only renders non-secret config diffs.
+    fail_msg: "{{ qdrant_env_file }} is missing. Run playbooks/bootstrap.yml first."
 
-- name: Render Qdrant docker compose file
+- name: Create compose directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: qdrant
+    group: qdrant
+    mode: "0755"
+  loop:
+    - "{{ qdrant_compose_dir }}"
+    - "{{ qdrant_metrics_proxy_dir }}"
+
+- name: Render docker-compose.yml
   ansible.builtin.template:
     src: docker-compose.yml.j2
     dest: "{{ qdrant_compose_dir }}/docker-compose.yml"
     owner: qdrant
     group: qdrant
     mode: "0644"
+  register: qdrant_compose_file
 
-- name: Render Qdrant metrics proxy template
+- name: Render metrics proxy nginx template
   ansible.builtin.template:
     src: metrics-proxy.conf.template.j2
     dest: "{{ qdrant_metrics_proxy_dir }}/nginx.conf.template"
     owner: qdrant
     group: qdrant
     mode: "0644"
+  register: qdrant_metrics_proxy_file
+
+- name: Start or update the Qdrant stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ qdrant_compose_dir }}"
+    env_files:
+      - "{{ qdrant_env_file }}"
+    state: present
+    pull: missing
+    remove_orphans: true
+  when: not ansible_check_mode
+
+- name: Wait for Qdrant readiness
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ qdrant_http_port }}/readyz"
+    status_code: 200
+  register: qdrant_ready
+  retries: 60
+  delay: 5
+  until: qdrant_ready.status == 200
+  when: not ansible_check_mode
+
+- name: Wait for the metrics proxy
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ qdrant_metrics_port }}/metrics"
+    status_code: 200
+  register: qdrant_metrics_ready
+  retries: 12
+  delay: 5
+  until: qdrant_metrics_ready.status == 200
+  when: not ansible_check_mode

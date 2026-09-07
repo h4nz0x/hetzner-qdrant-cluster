@@ -1,0 +1,52 @@
+---
+# Read-only health report. Does not change anything on the nodes.
+- name: Collect runtime evidence from every node
+  hosts: qdrant
+  become: true
+  gather_facts: false
+  tags: [audit]
+  vars:
+    qdrant_audit_dir: "{{ lookup('env', 'QDRANT_AUDIT_DIR') | default('/tmp/qdrant-audit', true) }}"
+  tasks:
+    - name: Run the read-only runtime reader
+      ansible.builtin.script:
+        cmd: "../../scripts/qdrant-runtime-read.sh {{ inventory_hostname }}"
+      register: qdrant_runtime_raw
+      changed_when: false
+
+    - name: Save node evidence on the controller
+      ansible.builtin.copy:
+        content: "{{ qdrant_runtime_raw.stdout }}"
+        dest: "{{ qdrant_audit_dir }}/{{ inventory_hostname }}.json"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+
+- name: Build the audit report
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tags: [audit]
+  vars:
+    qdrant_audit_dir: "{{ lookup('env', 'QDRANT_AUDIT_DIR') | default('/tmp/qdrant-audit', true) }}"
+  tasks:
+    - name: Render report
+      ansible.builtin.shell:
+        cmd: >-
+          set -euo pipefail;
+          args=();
+          for f in "{{ qdrant_audit_dir }}"/*-node-*.json; do args+=(--node-json "$f"); done;
+          python3 "{{ playbook_dir }}/../../scripts/qdrant-runtime-report.py" "${args[@]}"
+          --expected-image "{{ hostvars[groups['qdrant'][0]].qdrant_image }}"
+          --expected-node-count "{{ groups['qdrant'] | length }}"
+          --output-json "{{ qdrant_audit_dir }}/report.json"
+          --output-md "{{ qdrant_audit_dir }}/report.md";
+          cat "{{ qdrant_audit_dir }}/report.md"
+        executable: /bin/bash
+      changed_when: false
+      register: qdrant_report
+
+    - name: Show report
+      ansible.builtin.debug:
+        msg: "{{ qdrant_report.stdout_lines }}"

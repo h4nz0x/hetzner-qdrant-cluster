@@ -1,0 +1,46 @@
+---
+# The coordinator uses its own SSH key to pull snapshots from every node, so
+# the key is generated on the coordinator and its public half is installed on
+# all nodes. No private key ever passes through Ansible or GitHub.
+- name: Ensure the backup coordinator has an SSH key pair
+  hosts: qdrant_backup_coordinator
+  become: true
+  tags: [backup]
+  tasks:
+    - name: Create backup config directory
+      ansible.builtin.file:
+        path: /etc/qdrant-backup
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Generate coordinator SSH key
+      community.crypto.openssh_keypair:
+        path: /etc/qdrant-backup/qdrant_ssh_key
+        type: ed25519
+        comment: "qdrant-backup-coordinator"
+        owner: root
+        group: root
+        mode: "0400"
+      register: qdrant_backup_keypair
+
+- name: Authorize the coordinator key on every node
+  hosts: qdrant
+  become: true
+  tags: [backup]
+  tasks:
+    - name: Install coordinator public key for root
+      ansible.posix.authorized_key:
+        user: root
+        key: "{{ hostvars[groups['qdrant_backup_coordinator'][0]].qdrant_backup_keypair.public_key }}"
+        comment: "qdrant-backup-coordinator"
+        state: present
+
+- name: Install the snapshot backup timer on the coordinator
+  hosts: qdrant_backup_coordinator
+  become: true
+  tags: [backup]
+  roles:
+    - role: qdrant_backup
+      when: qdrant_backup_enabled | bool

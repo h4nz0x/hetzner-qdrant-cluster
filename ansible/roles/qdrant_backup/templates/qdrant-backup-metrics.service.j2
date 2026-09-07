@@ -1,7 +1,7 @@
 [Unit]
 Description=Export Qdrant backup metrics for node_exporter
-After=qdrant-backup.service node_exporter.service
+After=qdrant-backup.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 {{ qdrant_backup_lib_dir }}/qdrant-backup-metrics.py --manifest {{ qdrant_backup_state_dir }}/latest/qdrant-backup-manifest.json --cleanup-report {{ qdrant_backup_state_dir }}/latest/qdrant-local-snapshot-cleanup.json --output {{ qdrant_backup_metrics_file }} --retention-keep {{ qdrant_backup_retention_keep }}
+ExecStart=/usr/bin/python3 {{ qdrant_backup_lib_dir }}/qdrant-backup-metrics.py --manifest {{ qdrant_backup_state_dir }}/latest/qdrant-backup-manifest.json --cleanup-report {{ qdrant_backup_state_dir }}/latest/qdrant-local-snapshot-cleanup.json --output {{ qdrant_backup_metrics_file }} --retention-keep {{ qdrant_backup_retention_keep }} --cluster {{ qdrant_cluster_name | default('qdrant') }} --environment {{ qdrant_environment | default('production') }}
