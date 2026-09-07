@@ -248,5 +248,5 @@ jobs:
         if: always()
         run: |
           docker ps -aq --filter "name=qdrant-drill-${GITHUB_RUN_ID}-" | xargs -r docker rm -f >/dev/null 2>&1 || true
-          [[ -n "${DRILL_NETWORK:-}" ]] && docker network rm "$DRILL_NETWORK" >/dev/null 2>&1 || true
+          if [[ -n "${DRILL_NETWORK:-}" ]]; then docker network rm "$DRILL_NETWORK" >/dev/null 2>&1 || true; fi
           sudo rm -rf "${DRILL_DIR:-/nonexistent}"
