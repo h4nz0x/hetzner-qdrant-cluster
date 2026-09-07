@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_NODES = ("qdrant-node-1", "qdrant-node-2", "qdrant-node-3")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.:-]+$")
 BACKUP_ID = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 
@@ -55,6 +54,7 @@ def collection_names(node: dict[str, Any]) -> set[str]:
 def validate_manifest(
     manifest: dict[str, Any],
     requested_collection: str | None = None,
+    expected_node_count: int | None = None,
 ) -> dict[str, Any]:
     backup_id = manifest.get("backup_id")
     if not isinstance(backup_id, str) or not BACKUP_ID.fullmatch(backup_id):
@@ -78,15 +78,19 @@ def validate_manifest(
         node_name = require_safe(node.get("node"), "node")
         by_node[node_name] = node
 
-    missing = sorted(set(EXPECTED_NODES) - set(by_node))
-    if missing:
-        raise PreflightError(f"manifest is missing nodes: {', '.join(missing)}")
+    expected_nodes = list(by_node)
+    if not expected_nodes:
+        raise PreflightError("manifest has no nodes")
+    if expected_node_count is not None and len(expected_nodes) != expected_node_count:
+        raise PreflightError(
+            f"manifest is missing nodes: expected {expected_node_count}, found {len(expected_nodes)}"
+        )
 
     names_by_node = {
         node_name: collection_names(by_node[node_name])
-        for node_name in EXPECTED_NODES
+        for node_name in expected_nodes
     }
-    common_collections = set.intersection(*(names_by_node[node] for node in EXPECTED_NODES))
+    common_collections = set.intersection(*(names_by_node[node] for node in expected_nodes))
     if not common_collections:
         raise PreflightError("manifest has no collection snapshot present on every node")
 
@@ -101,7 +105,7 @@ def validate_manifest(
         selected_collection = sorted(common_collections)[0]
 
     selected_snapshots = []
-    for node_name in EXPECTED_NODES:
+    for node_name in expected_nodes:
         collections = by_node[node_name]["collections"]
         selected = next(
             item for item in collections if item["collection"] == selected_collection
@@ -123,7 +127,7 @@ def validate_manifest(
         "prefix": prefix.strip("/"),
         "selected_collection": selected_collection,
         "common_collections": sorted(common_collections),
-        "nodes": list(EXPECTED_NODES),
+        "nodes": expected_nodes,
         "snapshots": selected_snapshots,
         "total_selected_size": sum(item["size"] for item in selected_snapshots),
     }
@@ -132,6 +136,7 @@ def validate_manifest(
 def select_latest_complete(
     manifest_paths: list[Path],
     requested_collection: str | None = None,
+    expected_node_count: int | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     if not manifest_paths:
         raise PreflightError("at least one manifest path is required")
@@ -141,7 +146,7 @@ def select_latest_complete(
     for path in manifest_paths:
         try:
             manifest = read_manifest(path)
-            selected = validate_manifest(manifest, requested_collection)
+            selected = validate_manifest(manifest, requested_collection, expected_node_count)
             selected["source_manifest"] = str(path)
             accepted.append(selected)
         except (json.JSONDecodeError, OSError, PreflightError) as exc:
@@ -168,10 +173,8 @@ def render_summary(selection: dict[str, Any], rejected: list[dict[str, str]]) ->
         "## Restore drill inputs",
         "",
         "```text",
-        "confirmation=RUN_QDRANT_RESTORE_DRILL",
         f"backup_id={selection['backup_id']}",
         f"collection={selection['selected_collection']}",
-        "source_node=qdrant-node-1",
         "```",
         "",
     ]
@@ -190,6 +193,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Select latest Qdrant restore backup")
     parser.add_argument("--manifest", type=Path, action="append", required=True)
     parser.add_argument("--collection")
+    parser.add_argument("--expected-node-count", type=int)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-md", type=Path, required=True)
     return parser.parse_args(argv)
@@ -198,7 +202,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     try:
-        selection, rejected = select_latest_complete(args.manifest, args.collection)
+        selection, rejected = select_latest_complete(
+            args.manifest, args.collection, args.expected_node_count
+        )
     except PreflightError as exc:
         raise SystemExit(f"Qdrant latest restore preflight failed: {exc}") from exc
 

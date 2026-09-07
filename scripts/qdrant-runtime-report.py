@@ -12,9 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_QDRANT_IMAGE = "qdrant/qdrant:v1.17.0"
-EXPECTED_METRICS_PROXY_IMAGE = "nginx:1.25-alpine"
-EXPECTED_NODES = ("qdrant-node-1", "qdrant-node-2", "qdrant-node-3")
+DEFAULT_QDRANT_IMAGE = "qdrant/qdrant:v1.17.0"
 
 
 @dataclass(frozen=True)
@@ -154,17 +152,24 @@ def sanitize_node(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def evaluate(nodes: list[dict[str, Any]]) -> list[Finding]:
+def evaluate(
+    nodes: list[dict[str, Any]],
+    expected_image: str,
+    expected_node_count: int,
+) -> list[Finding]:
     findings: list[Finding] = []
-    by_name = {node.get("node"): node for node in nodes}
-
-    for name in EXPECTED_NODES:
-        node = by_name.get(name)
-        if not node:
-            findings.append(
-                Finding("high", "node", "Expected Qdrant runtime node is missing.", {"node": name})
+    if len(nodes) != expected_node_count:
+        findings.append(
+            Finding(
+                "high",
+                "node",
+                "Number of reporting nodes differs from the expected cluster size.",
+                {"expected": expected_node_count, "reporting": len(nodes)},
             )
-            continue
+        )
+
+    for node in nodes:
+        name = node.get("node")
 
         qdrant = node["qdrant_container"]
         if not qdrant["present"]:
@@ -175,7 +180,7 @@ def evaluate(nodes: list[dict[str, Any]]) -> list[Finding]:
             findings.append(
                 Finding("high", "container", "Qdrant container is not running.", {"node": name})
             )
-        if qdrant["image"] != EXPECTED_QDRANT_IMAGE:
+        if qdrant["image"] != expected_image:
             findings.append(
                 Finding(
                     "medium",
@@ -183,7 +188,7 @@ def evaluate(nodes: list[dict[str, Any]]) -> list[Finding]:
                     "Qdrant image tag differs from the reviewed baseline.",
                     {
                         "node": name,
-                        "expected_image": EXPECTED_QDRANT_IMAGE,
+                        "expected_image": expected_image,
                         "live_image": qdrant["image"],
                     },
                 )
@@ -199,19 +204,6 @@ def evaluate(nodes: list[dict[str, Any]]) -> list[Finding]:
                     {"node": name},
                 )
             )
-        if metrics_proxy["image"] not in (EXPECTED_METRICS_PROXY_IMAGE, None):
-            findings.append(
-                Finding(
-                    "medium",
-                    "container",
-                    "Metrics proxy image tag differs from the reviewed baseline.",
-                    {
-                        "node": name,
-                        "expected_image": EXPECTED_METRICS_PROXY_IMAGE,
-                        "live_image": metrics_proxy["image"],
-                    },
-                )
-            )
 
         if node["readiness_status"] != "ok":
             findings.append(
@@ -224,12 +216,12 @@ def evaluate(nodes: list[dict[str, Any]]) -> list[Finding]:
             )
 
         peer_total = node["cluster_peer_count"]
-        if peer_total is None or peer_total < 3:
+        if peer_total is None or peer_total < expected_node_count:
             findings.append(
                 Finding(
                     "high",
                     "cluster",
-                    "Qdrant cluster peer count is below the expected three nodes.",
+                    "Qdrant cluster peer count is below the expected cluster size.",
                     {"node": name, "cluster_peer_count": peer_total},
                 )
             )
@@ -288,18 +280,23 @@ def evaluate(nodes: list[dict[str, Any]]) -> list[Finding]:
     return findings
 
 
-def build_report(node_files: list[Path]) -> dict[str, Any]:
+def build_report(
+    node_files: list[Path],
+    expected_image: str = DEFAULT_QDRANT_IMAGE,
+    expected_node_count: int | None = None,
+) -> dict[str, Any]:
     nodes = [sanitize_node(read_node_file(path)) for path in node_files]
     nodes = sorted(nodes, key=lambda item: str(item.get("node")))
-    findings = evaluate(nodes)
+    if expected_node_count is None:
+        expected_node_count = len(nodes)
+    findings = evaluate(nodes, expected_image, expected_node_count)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "nodes": nodes,
         "findings": [finding.as_dict() for finding in findings],
         "expected": {
-            "qdrant_image": EXPECTED_QDRANT_IMAGE,
-            "metrics_proxy_image": EXPECTED_METRICS_PROXY_IMAGE,
-            "nodes": list(EXPECTED_NODES),
+            "qdrant_image": expected_image,
+            "node_count": expected_node_count,
         },
     }
 
@@ -364,6 +361,8 @@ def render_markdown(report: dict[str, Any]) -> str:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build sanitized Qdrant runtime audit report")
     parser.add_argument("--node-json", type=Path, action="append", required=True)
+    parser.add_argument("--expected-image", default=DEFAULT_QDRANT_IMAGE)
+    parser.add_argument("--expected-node-count", type=int)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-md", type=Path, required=True)
     return parser.parse_args(argv)
@@ -371,7 +370,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
-    report = build_report(args.node_json)
+    report = build_report(args.node_json, args.expected_image, args.expected_node_count)
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_md.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")

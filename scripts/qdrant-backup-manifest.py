@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_NODES = ("qdrant-node-1", "qdrant-node-2", "qdrant-node-3")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.:-]+$")
 BACKUP_ID = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 SHA256 = re.compile(r"^[A-Fa-f0-9]{64}$")
@@ -50,6 +49,7 @@ def build_manifest(
     backup_id: str,
     bucket: str,
     prefix: str,
+    expected_node_count: int | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if not BACKUP_ID.fullmatch(backup_id):
         raise ManifestError("backup_id must be an exact UTC timestamp like 2026-07-29T02:30:00Z")
@@ -68,13 +68,17 @@ def build_manifest(
             raise ManifestError(f"duplicate node payload: {node}")
         by_node[node] = payload
 
-    missing = sorted(set(EXPECTED_NODES) - set(by_node))
-    if missing:
-        raise ManifestError(f"missing node payloads: {', '.join(missing)}")
+    expected_nodes = tuple(sorted(by_node))
+    if not expected_nodes:
+        raise ManifestError("at least one node payload is required")
+    if expected_node_count is not None and len(expected_nodes) != expected_node_count:
+        raise ManifestError(
+            f"expected {expected_node_count} node payloads, got {len(expected_nodes)}"
+        )
 
     collections_by_node: dict[str, list[dict[str, Any]]] = {}
     upload_plan: list[dict[str, Any]] = []
-    for node in EXPECTED_NODES:
+    for node in expected_nodes:
         payload = by_node[node]
         if payload.get("backup_id") != backup_id:
             raise ManifestError(f"{node} backup_id does not match {backup_id}")
@@ -123,11 +127,11 @@ def build_manifest(
         node: {item["collection"] for item in items}
         for node, items in collections_by_node.items()
     }
-    expected_collections = collection_sets[EXPECTED_NODES[0]]
+    expected_collections = collection_sets[expected_nodes[0]]
     for node, names in collection_sets.items():
         if names != expected_collections:
             raise ManifestError(
-                f"{node} collection set differs from {EXPECTED_NODES[0]}"
+                f"{node} collection set differs from {expected_nodes[0]}"
             )
 
     manifest_key = f"{prefix}/{backup_id}/manifest.json"
@@ -139,7 +143,7 @@ def build_manifest(
         "manifest_key": manifest_key,
         "nodes": [
             {"node": node, "collections": collections_by_node[node]}
-            for node in EXPECTED_NODES
+            for node in expected_nodes
         ],
         "upload_plan": upload_plan,
     }
@@ -180,6 +184,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-md", type=Path, required=True)
     parser.add_argument("--upload-tsv", type=Path, required=True)
+    parser.add_argument(
+        "--expected-node-count",
+        type=int,
+        help="Fail unless exactly this many node payloads were provided",
+    )
     return parser.parse_args(argv)
 
 
@@ -191,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             args.backup_id,
             args.bucket,
             args.prefix,
+            args.expected_node_count,
         )
     except ManifestError as exc:
         raise SystemExit(f"Qdrant backup manifest failed: {exc}") from exc

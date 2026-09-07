@@ -145,7 +145,7 @@ cat <<JSON
   "hostname": $(hostname | json_escape),
   "qdrant_container": $(docker_inspect_json qdrant_node${node_name##*-}),
   "metrics_proxy_container": $(docker_inspect_json qdrant_metrics_proxy),
-  "readiness": $(curl_json /readiness),
+  "readiness": $(curl_json /readyz),
   "cluster": $(curl_json /cluster),
   "collections": ${collection_reports},
   "storage": ${storage_stat}

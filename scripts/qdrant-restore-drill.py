@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_NODES = ("qdrant-node-1", "qdrant-node-2", "qdrant-node-3")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.:-]+$")
 BACKUP_ID = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 
@@ -46,9 +45,8 @@ def node_map(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
             raise RestoreDrillError("manifest contains a malformed node")
         name = require_safe(node.get("node"), "node")
         result[name] = node
-    missing = sorted(set(EXPECTED_NODES) - set(result))
-    if missing:
-        raise RestoreDrillError(f"manifest is missing nodes: {', '.join(missing)}")
+    if not result:
+        raise RestoreDrillError("manifest has no nodes")
     return result
 
 
@@ -151,8 +149,9 @@ def select_snapshot_set(
         raise RestoreDrillError("manifest backup_id does not match requested backup_id")
 
     by_node = node_map(manifest)
+    expected_nodes = list(by_node)
     if collection is None:
-        common = set.intersection(*(collection_names(by_node[node]) for node in EXPECTED_NODES))
+        common = set.intersection(*(collection_names(by_node[node]) for node in expected_nodes))
         if not common:
             raise RestoreDrillError("manifest has no collection snapshot present on every node")
         collection_name = sorted(common)[0]
@@ -165,7 +164,7 @@ def select_snapshot_set(
         raise RestoreDrillError("manifest bucket and prefix are required")
 
     snapshots: list[dict[str, Any]] = []
-    for node_name in EXPECTED_NODES:
+    for node_name in expected_nodes:
         collections = by_node[node_name].get("collections")
         if not isinstance(collections, list):
             raise RestoreDrillError(f"{node_name} collections must be a list")
@@ -205,7 +204,7 @@ def select_snapshot_set(
         "bucket": bucket,
         "prefix": prefix,
         "collection": collection_name,
-        "nodes": list(EXPECTED_NODES),
+        "nodes": expected_nodes,
         "snapshots": snapshots,
         "total_expected_size": sum(item["expected_size"] for item in snapshots),
     }
@@ -388,7 +387,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     plan = subcommands.add_parser("plan", help="Build a restore drill plan")
     plan.add_argument("--manifest", type=Path, required=True)
     plan.add_argument("--backup-id", required=True)
-    plan.add_argument("--source-node", default="qdrant-node-1", help=argparse.SUPPRESS)
     plan.add_argument("--collection")
     plan.add_argument("--snapshot-dir", type=Path, required=True)
     plan.add_argument("--output-json", type=Path, required=True)

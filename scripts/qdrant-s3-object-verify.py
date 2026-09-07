@@ -19,8 +19,18 @@ class VerificationError(Exception):
 
 
 def verify_head_object(
-    payload: dict[str, Any], expected_size: int, expected_sha256: str
+    payload: dict[str, Any],
+    expected_size: int,
+    expected_sha256: str,
+    strict: bool = True,
 ) -> dict[str, Any]:
+    """Validate a head-object response.
+
+    strict=True (AWS S3) additionally requires the S3-computed SHA-256 checksum
+    and server-side encryption. S3-compatible stores such as Hetzner Object
+    Storage do not return those fields, so strict=False only checks size, ETag
+    and the SHA-256 recorded as object metadata by the uploader.
+    """
     if expected_size <= 0:
         raise VerificationError("expected size must be positive")
     if not SHA256.fullmatch(expected_sha256):
@@ -41,7 +51,7 @@ def verify_head_object(
         raise VerificationError("S3 object SHA-256 metadata does not match the manifest")
 
     checksum_sha256 = payload.get("ChecksumSHA256")
-    if not isinstance(checksum_sha256, str) or not checksum_sha256:
+    if strict and (not isinstance(checksum_sha256, str) or not checksum_sha256):
         raise VerificationError("S3 did not return its stored SHA-256 checksum")
 
     etag = payload.get("ETag")
@@ -49,7 +59,7 @@ def verify_head_object(
         raise VerificationError("S3 object ETag is missing")
 
     encryption = payload.get("ServerSideEncryption")
-    if encryption not in ALLOWED_ENCRYPTION:
+    if strict and encryption not in ALLOWED_ENCRYPTION:
         raise VerificationError(
             f"S3 object encryption is missing or unsupported: {encryption!r}"
         )
@@ -61,6 +71,7 @@ def verify_head_object(
         "s3_checksum_sha256": checksum_sha256,
         "etag": etag.strip('"'),
         "server_side_encryption": encryption,
+        "strict": strict,
     }
 
 
@@ -69,6 +80,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--expected-size", type=int, required=True)
     parser.add_argument("--expected-sha256", required=True)
     parser.add_argument("--object", required=True)
+    parser.add_argument(
+        "--no-strict",
+        action="store_true",
+        help="Skip S3 checksum and encryption checks (S3-compatible storage)",
+    )
     return parser.parse_args(argv)
 
 
@@ -78,7 +94,9 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(payload, dict):
         raise SystemExit("S3 head-object response must be a JSON object")
     try:
-        result = verify_head_object(payload, args.expected_size, args.expected_sha256)
+        result = verify_head_object(
+            payload, args.expected_size, args.expected_sha256, strict=not args.no_strict
+        )
     except VerificationError as exc:
         raise SystemExit(f"S3 object verification failed for {args.object}: {exc}") from exc
     result["object"] = args.object

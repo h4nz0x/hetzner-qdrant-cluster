@@ -12,8 +12,6 @@ s3_verify_script="${lib_dir}/qdrant-s3-object-verify.py"
 stream_verify_script="${lib_dir}/qdrant-stream-verify.py"
 cleanup_report_script="${lib_dir}/qdrant-local-cleanup-report.py"
 remote_cmd='/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash -s --'
-nodes=(qdrant-node-1 qdrant-node-2 qdrant-node-3)
-host_ips=(203.0.113.11 203.0.113.12 203.0.113.13)
 backup_id=""
 backup_status="running"
 backup_phase="initializing"
@@ -23,6 +21,18 @@ if [[ -r "$env_file" ]]; then
   # shellcheck source=/dev/null
   source "$env_file"
   set +a
+fi
+
+# Node names and private IPs are rendered into backup.env by Ansible from the
+# inventory, so this script never needs editing when the cluster grows.
+read -r -a nodes <<< "${QDRANT_BACKUP_NODES:-}"
+read -r -a host_ips <<< "${QDRANT_BACKUP_NODE_IPS:-}"
+strict_verify="${QDRANT_BACKUP_S3_STRICT_VERIFY:-true}"
+verify_flags=()
+checksum_flags=(--checksum-algorithm SHA256)
+if [[ "$strict_verify" != "true" ]]; then
+  verify_flags=(--no-strict)
+  checksum_flags=()
 fi
 
 send_slack_notification() {
@@ -81,7 +91,7 @@ payload = {
                 {"title": title, "value": value, "short": True}
                 for title, value in fields
             ],
-            "footer": "Example Qdrant snapshot backup",
+            "footer": "Qdrant snapshot backup",
             "ts": int(time.time()),
         }
     ],
@@ -123,6 +133,8 @@ required_vars=(
   AWS_DEFAULT_REGION
   QDRANT_BACKUP_S3_BUCKET
   QDRANT_BACKUP_S3_PREFIX
+  QDRANT_BACKUP_NODES
+  QDRANT_BACKUP_NODE_IPS
 )
 
 for name in "${required_vars[@]}"; do
@@ -131,6 +143,11 @@ for name in "${required_vars[@]}"; do
     exit 1
   fi
 done
+
+if [[ "${#nodes[@]}" -lt 1 || "${#nodes[@]}" -ne "${#host_ips[@]}" ]]; then
+  printf 'QDRANT_BACKUP_NODES and QDRANT_BACKUP_NODE_IPS must list the same number of entries\n' >&2
+  exit 1
+fi
 
 for command in aws date mktemp python3 sha256sum ssh ssh-keygen ssh-keyscan stat timeout; do
   command -v "$command" >/dev/null 2>&1 || {
@@ -199,10 +216,13 @@ for node in "${nodes[@]}"; do
 done
 
 backup_phase="building manifest"
+node_json_args=()
+for node in "${nodes[@]}"; do
+  node_json_args+=(--node-json "${raw_dir}/${node}.json")
+done
 python3 "$manifest_script" \
-  --node-json "${raw_dir}/qdrant-node-1.json" \
-  --node-json "${raw_dir}/qdrant-node-2.json" \
-  --node-json "${raw_dir}/qdrant-node-3.json" \
+  "${node_json_args[@]}" \
+  --expected-node-count "${#nodes[@]}" \
   --backup-id "$backup_id" \
   --bucket "$QDRANT_BACKUP_S3_BUCKET" \
   --prefix "$QDRANT_BACKUP_S3_PREFIX" \
@@ -227,7 +247,7 @@ while IFS=$'\t' read -r node collection snapshot_name s3_key expected_size expec
         --report "$stream_report" \
     | aws s3 cp - "$object_uri" \
         --expected-size "$expected_size" \
-        --checksum-algorithm SHA256 \
+        "${checksum_flags[@]}" \
         --metadata "qdrant-sha256=${expected_checksum}" \
         --only-show-errors
   cat "$stream_report" >> "${report_dir}/source-stream-verification.jsonl"
@@ -242,6 +262,7 @@ while IFS=$'\t' read -r node collection snapshot_name s3_key expected_size expec
         --expected-size "$expected_size" \
         --expected-sha256 "$expected_checksum" \
         --object "$object_uri" \
+        "${verify_flags[@]}" \
         >> "${report_dir}/s3-object-verification.jsonl"
   backup_phase="uploading snapshots to S3"
 done < "${report_dir}/qdrant-backup-upload.tsv"
@@ -261,7 +282,7 @@ manifest_checksum="$(sha256sum "$manifest_file")"
 manifest_checksum="${manifest_checksum%% *}"
 manifest_uri="s3://${QDRANT_BACKUP_S3_BUCKET}/${manifest_key}"
 aws s3 cp "$manifest_file" "$manifest_uri" \
-  --checksum-algorithm SHA256 \
+  "${checksum_flags[@]}" \
   --metadata "qdrant-sha256=${manifest_checksum}" \
   --only-show-errors
 
@@ -275,6 +296,7 @@ aws s3api head-object \
       --expected-size "$manifest_size" \
       --expected-sha256 "$manifest_checksum" \
       --object "$manifest_uri" \
+      "${verify_flags[@]}" \
       >> "${report_dir}/s3-object-verification.jsonl"
 
 backup_phase="applying S3 retention"
