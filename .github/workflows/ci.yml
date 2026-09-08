@@ -158,7 +158,7 @@ jobs:
 
       - name: Comment plan on the pull request
         if: steps.creds.outputs.configured == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
